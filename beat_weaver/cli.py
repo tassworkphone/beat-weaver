@@ -174,10 +174,12 @@ def cmd_generate(args: argparse.Namespace) -> None:
     ckpt_dir = Path(args.checkpoint)
     config = ModelConfig.load(ckpt_dir / "config.json")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BeatWeaverModel(config)
     model.load_state_dict(
         torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
     )
+    model.to(device)
     model.eval()
 
     audio, sr = load_audio(Path(args.audio), sr=config.sample_rate)
@@ -240,10 +242,12 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     ckpt_dir = Path(args.checkpoint)
     config = ModelConfig.load(ckpt_dir / "config.json")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BeatWeaverModel(config)
     model.load_state_dict(
         torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
     )
+    model.to(device)
     model.eval()
 
     test_ds = BeatSaberDataset(Path(args.data), Path(args.audio_manifest), config, split="test")
