@@ -8,6 +8,9 @@ from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.inference import _build_grammar_mask, generate, generate_full_song
 from beat_weaver.model.tokenizer import (
     BAR,
+    BOMB_BASE,
+    BOMB_COUNT,
+    BOMB_EMPTY,
     DIFF_EASY,
     DIFF_EXPERT,
     DIFF_EXPERT_PLUS,
@@ -22,6 +25,7 @@ from beat_weaver.model.tokenizer import (
     RIGHT_EMPTY,
     START,
     VOCAB_SIZE,
+    VOCAB_SIZE_WITH_BOMBS,
 )
 from beat_weaver.model.transformer import BeatWeaverModel
 
@@ -85,6 +89,41 @@ class TestGrammarMask:
         assert mask[BAR]
         assert mask[END]
 
+    def test_after_right_with_bombs_goes_to_bomb_slot(self):
+        """With include_bombs=True, RIGHT transitions to BOMB, not POS/BAR/END."""
+        mask = _build_grammar_mask(RIGHT_BASE + 5, include_bombs=True)
+        assert mask.shape[0] == VOCAB_SIZE_WITH_BOMBS
+        assert mask[BOMB_EMPTY]
+        assert mask[BOMB_BASE:BOMB_BASE + BOMB_COUNT].all()
+        assert not mask[POS_BASE]
+        assert not mask[BAR]
+        assert not mask[END]
+
+    def test_after_right_empty_with_bombs_goes_to_bomb_slot(self):
+        mask = _build_grammar_mask(RIGHT_EMPTY, include_bombs=True)
+        assert mask[BOMB_EMPTY]
+        assert mask[BOMB_BASE:BOMB_BASE + BOMB_COUNT].all()
+
+    def test_after_bomb_goes_to_pos_bar_end(self):
+        mask = _build_grammar_mask(BOMB_BASE + 3, last_pos_in_bar=5, include_bombs=True)
+        assert mask[POS_BASE + 6: POS_BASE + POS_COUNT].all()
+        assert not mask[POS_BASE + 5]  # strictly increasing, same as RIGHT->POS
+        assert mask[BAR]
+        assert mask[END]
+
+    def test_after_bomb_empty_goes_to_pos_bar_end(self):
+        mask = _build_grammar_mask(BOMB_EMPTY, last_pos_in_bar=-1, include_bombs=True)
+        assert mask[POS_BASE:POS_BASE + POS_COUNT].all()
+        assert mask[BAR]
+        assert mask[END]
+
+    def test_include_bombs_false_matches_default_shape(self):
+        """Sanity check: default behavior (no bombs) is unaffected by the new param."""
+        mask_default = _build_grammar_mask(RIGHT_BASE + 5)
+        mask_explicit = _build_grammar_mask(RIGHT_BASE + 5, include_bombs=False)
+        assert mask_default.shape == mask_explicit.shape == (VOCAB_SIZE,)
+        assert torch.equal(mask_default, mask_explicit)
+
 
 class TestGenerate:
     @pytest.fixture
@@ -143,6 +182,58 @@ class TestGenerate:
         tokens = generate(model, mel, "Expert", config, temperature=0)
         assert tokens[0] == START
         assert tokens[1] == DIFF_EXPERT
+
+
+class TestGenerateWithBombs:
+    @pytest.fixture
+    def small_bomb_model(self):
+        config = ModelConfig(
+            vocab_size=VOCAB_SIZE_WITH_BOMBS,
+            max_seq_len=64,
+            n_mels=80,
+            encoder_layers=1,
+            encoder_dim=32,
+            encoder_heads=4,
+            encoder_ff_dim=64,
+            decoder_layers=1,
+            decoder_dim=32,
+            decoder_heads=4,
+            decoder_ff_dim=64,
+            dropout=0.0,
+            include_bombs=True,
+        )
+        model = BeatWeaverModel(config)
+        return model, config
+
+    def test_grammar_valid_sequence_with_bombs(self, small_bomb_model):
+        """Every generated token follows the bomb-aware grammar (POS LEFT RIGHT BOMB)."""
+        model, config = small_bomb_model
+        mel = torch.randn(80, 20)
+        tokens = generate(model, mel, "Expert", config, temperature=1.0, seed=42)
+
+        for i in range(1, len(tokens)):
+            prev = tokens[i - 1]
+            curr = tokens[i]
+            mask = _build_grammar_mask(prev, include_bombs=True)
+            assert mask[curr], (
+                f"Token {curr} not valid after {prev} at position {i}. "
+                f"Sequence so far: {tokens[:i+1]}"
+            )
+
+    def test_decode_produces_bomb_notes(self, small_bomb_model):
+        """End-to-end: generated bomb tokens decode to color=3 Note entries."""
+        from beat_weaver.model.tokenizer import decode_tokens
+
+        model, config = small_bomb_model
+        mel = torch.randn(80, 20)
+        tokens = generate(model, mel, "Expert", config, temperature=1.0, seed=1)
+        notes = decode_tokens(tokens, bpm=120.0, include_bombs=True)
+        # With a random model, bombs may or may not appear — just verify decoding
+        # never crashes and any bombs present are well-formed.
+        for n in notes:
+            assert n.color in (0, 1, 3)
+            if n.color == 3:
+                assert 0 <= n.x < 4 and 0 <= n.y < 3
 
 
 class TestGenerateFullSong:

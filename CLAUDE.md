@@ -14,7 +14,11 @@ Given an audio file as input, the system generates block positions and orientati
 4. **Model Improvements** (complete) — Filtering, SpecAugment, onset features, RoPE, color balance loss, medium config
 5. **Conformer Encoder** (complete) — Conformer blocks (conv + attention) replace pure transformer encoder, now default
 6. **Full-Song Generation** (complete) — Windowed inference with overlap stitching for songs of any length
-7. **Feedback System** (future) — In-game mechanism for player feedback to improve the model
+7. **Bombs** (complete) — Model-native compound token (`include_bombs` config flag, opt-in, vocab 291→304)
+8. **Walls/Obstacles** (complete) — Rule-based post-processing (`beat_weaver.model.obstacles`), stats mined from real Parquet data with outlier filtering (community "wall art" maps pollute raw obstacle data — see Open Questions)
+9. **Official DLC as training data** (complete) — `extract-official` pulls base game + all owned DLC (332 levels extracted from a full-DLC install, far more than the original 214); official maps get oversampled via `official_ratio` for quality/consistency
+10. **Arcs/Chains** (not started, newly unlocked) — See Open Questions
+11. **Feedback System / Self-Improvement Loop** (future) — See Open Questions
 
 ## Beat Saber Map Format Quick Reference
 
@@ -44,7 +48,8 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 | `beat-weaver process` | Normalize raw maps to Parquet |
 | `beat-weaver run` | Full pipeline (all sources) |
 | `beat-weaver train` | Train the ML model |
-| `beat-weaver generate` | Generate a Beat Saber map from audio |
+| `beat-weaver generate` | Generate a Beat Saber map from audio (bombs if checkpoint trained with them; walls always, unless `--no-obstacles`) |
+| `beat-weaver analyze-obstacles` | Mine real wall placement stats (density/duration/width/crouch-ratio) from processed data, filtering out modded/"wall art" outliers |
 | `beat-weaver evaluate` | Evaluate model on test data |
 
 **Key modules:**
@@ -52,7 +57,8 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 - `beat_weaver.sources.beatsaver` — BeatSaver API client + downloader
 - `beat_weaver.sources.unity_extractor` — official map + audio extraction from Unity bundles (base + DLC)
 - `beat_weaver.storage.writer` — Parquet output (notes/bombs/obstacles)
-- `beat_weaver.model.tokenizer` — encode/decode beatmaps ↔ token sequences (291 vocab)
+- `beat_weaver.model.tokenizer` — encode/decode beatmaps ↔ token sequences (291 vocab, or 304 with `include_bombs=True`)
+- `beat_weaver.model.obstacles` — rule-based wall/obstacle placement (mine stats from Parquet, generate walls in gaps between generated notes)
 - `beat_weaver.model.audio` — mel spectrogram extraction, beat-aligned framing, BPM auto-detection
 - `beat_weaver.model.transformer` — AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel (RoPE or sinusoidal PE)
 - `beat_weaver.model.inference` — autoregressive generation with grammar mask + windowed full-song generation
@@ -61,7 +67,7 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 
 **Output format:** `data/processed/notes_NNNN.parquet` (one row group per song, split at 1 GB) with columns: song_hash, source, difficulty, characteristic, bpm, beat, time_seconds, x, y, color, cut_direction, angle_offset. Reader (`read_notes_parquet`) handles both multi-file and legacy single-file layouts.
 
-**Model configs:** `configs/small.json` (1M params, batch_size=32) for fast iteration. `configs/medium.json` (6.5M params, 4L/256d) for standard transformer. `configs/medium_conformer.json` (9.4M params, Conformer, 8GB VRAM). `configs/large_conformer.json` (62M params, 6L/512d, Conformer, 24GB+ VRAM) for full training.
+**Model configs:** `configs/small.json` (1M params, batch_size=32) for fast iteration. `configs/small_bombs.json` (same size, `include_bombs=true`, vocab_size=304) — the CPU/small-GPU-appropriate config with bombs. `configs/medium.json` (6.5M params, 4L/256d) for standard transformer. `configs/medium_conformer.json` (9.4M params, Conformer, 8GB VRAM). `configs/large_conformer.json` (62M params, 6L/512d, Conformer, 24GB+ VRAM) for full training.
 
 **Tests:** `python -m pytest tests/ -v` (178 tests; ML tests skipped without `.[ml]` deps)
 
@@ -75,7 +81,7 @@ See [RESEARCH.md](RESEARCH.md) for research details, [plans/002-ml-model.md](pla
 - **Audio encoder:** Conformer (default) or standard Transformer. Conformer blocks use FFN/2 + Self-Attention + DepthwiseConv + FFN/2 + LayerNorm (Gulati et al., 2020). Config: `use_conformer=True` (default), `conformer_kernel_size=31`.
 - **Audio input:** Log-mel spectrogram (80 bins, sr=22050, hop=512), beat-aligned to 1/16th note grid. Optional onset strength channel (+1 bin).
 - **Positional encoding:** RoPE (default) or sinusoidal (config.use_rope=False). RoPE applied to self-attention Q/K only (not cross-attention).
-- **Scope:** Color notes only (no bombs, walls, arcs, chains until core model performs well)
+- **Scope:** Color notes (model-native) + bombs (model-native, opt-in `include_bombs`) + walls (rule-based post-processing, not model-native — see `beat_weaver.model.obstacles`). Arcs/chains not yet implemented (no parser support), but see Open Questions — official DLC data unlocks this.
 - **Output:** Beat-quantized compound tokens (291 vocab) → v2 Beat Saber JSON
 - **Token format:** `START DIFF BAR POS LEFT RIGHT ... BAR ... END`
 - **Training:** Cross-entropy with label smoothing + optional color balance auxiliary loss, AdamW + cosine LR, mixed-precision, early stopping, weighted sampling (official 20% of batch, custom weighted by BeatSaver score)
@@ -113,8 +119,26 @@ Comparable to the small model baseline (60.6% on all difficulties) despite train
 
 **Checkpoint resume:** Must save ALL training state (model, optimizer, scheduler, GradScaler). Missing GradScaler was root cause of NaN on resume (fresh scaler at scale=65536 causes overflow). Now saves `scheduler.pt` + `scaler.pt`; fallbacks handle old checkpoints.
 
+### Small + Bombs (1.4M params, GPU)
+
+`configs/small_bombs.json`, 30 epochs, ~1,963 BeatSaver songs (all difficulties): **val_loss=1.9663, 67.5% token accuracy** (epoch 27) — notably above the original 60.6% baseline, on GPU in ~68 min (RTX 3060). A second run added 332 extracted official DLC levels (~2,295 songs total, oversampled via `official_ratio`) — see `output/training_v2/` once complete.
+
+**Note on the ~60-68% accuracy ceiling:** likely dominated by the one-to-many nature of mapping (many valid note patterns exist for the same audio; token accuracy penalizes any deviation from one specific reference mapper's choice) plus mixed mapper skill/style in the BeatSaver corpus — not primarily a model-capacity problem. Evidence: scaling 1M→9.4M params barely moved accuracy (60.6%→59.4%). The onset F1 / parity violation / NPS accuracy / pattern diversity metrics in `evaluate.py` are more meaningful quality signals than raw token accuracy for this reason.
+
 ## Open Questions
 
-- **Data filter broadening:** Expert+ only (~18K samples) limits the 9.4M param Conformer. Adding Expert maps would roughly double the dataset.
-- **Feedback capture system:** In-game mechanism to collect player feedback (later phase)
-- **RL fine-tuning:** After supervised pretraining, fine-tune with player feedback reward model
+- **Data filter broadening:** Expert+ only (~18K samples) limits the 9.4M param Conformer. Adding Expert maps would roughly double the dataset. (Moot for `small*.json` configs, which default to `min_difficulty="Easy"` — already maximally broad.)
+
+- **Arcs/Chains — newly unlocked by official DLC data.** No parser support exists yet (`schemas/v2.py`/`v3.py`/`v4.py` don't read `arcs`/`chains`/`chainsData`/`arcsData` fields at all), but this is now much more tractable: extracted official DLC `.dat` files (`data/raw/official/*/*.dat`) already contain these fields natively in v4 JSON — most official tracks have 50-170+ arc/chain events each, cleanly placed (no "wall art"-style pollution like community obstacle data has). The raw extraction is already done; what's missing is: (1) `Chain`/`Arc` dataclasses in `schemas/normalized.py`, (2) reading them out in `v4.py` (and `v3.py` for the rarer v3 community maps that have them), (3) a Parquet schema/writer + reader (mirroring `bombs`/`obstacles`), (4) a modeling decision — bombs' precedent (model-native compound token) is the likely fit since chains/arcs are point-ish events with a head+tail rather than open-ended extent like walls, but arcs specifically carry continuous curve/multiplier data that may not compress into a small discrete vocab as cleanly as bombs did. Re-running `process` (not `extract-official`) is sufficient once parser support lands — no new extraction needed.
+
+- **Self-improvement loop (generate → filter → retrain) — plan, not yet built.** The idea: once a decent checkpoint (with bombs/walls/arcs/chains) exists, generate a batch of new maps with it, and feed the *good* ones back into training to bootstrap a better model. **This must not be done naively** — feeding a model's own unfiltered outputs back into its own training data is a well-documented failure mode ("model collapse": the model only reinforces patterns it already has, including its existing flaws like color imbalance, and quality drifts down over generations rather than up, since no new information is introduced). The loop only works with a **quality filter** between generation and retraining:
+  1. Generate a batch of candidate maps from the current best checkpoint (varying seed/temperature/source songs).
+  2. **Filter** — keep only maps that pass a quality bar, via either:
+     - *Automated*: score with `beat_weaver.model.evaluate`'s existing metrics (onset F1, parity violation rate, NPS accuracy, pattern diversity) and threshold.
+     - *Human*: actual player feedback (fun/playable rating) — this is the original "Feedback capture system" / "RL fine-tuning" idea below, generalized.
+  3. **Mix, don't replace** — add the filtered generated maps into training *alongside* the full real dataset (BeatSaver + official), at a modest ratio (similar spirit to `official_ratio`'s existing oversampling knob), never as a replacement for real data.
+  4. Retrain/fine-tune from the current checkpoint (low LR, short run — see fine-tuning caveats: a `--resume` reuses the original run's fully-decayed cosine LR schedule, so a dedicated low-LR short-schedule config is needed for this, not the original training config as-is).
+  - Prerequisite: this is worth building only once chains/arcs and general map quality are solid — bootstrapping from a weak model mostly just amplifies its weaknesses faster.
+
+- **Feedback capture system:** In-game mechanism to collect player feedback (later phase) — the human-filter half of the self-improvement loop above.
+- **RL fine-tuning:** After supervised pretraining, fine-tune with a player-feedback reward model — a further formalization of the self-improvement loop using real human ratings as the reward signal instead of (or alongside) automated heuristic metrics.

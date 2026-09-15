@@ -36,7 +36,9 @@ def cmd_extract_official(args: argparse.Namespace) -> None:
         / "aa"
         / "StandaloneWindows64"
     )
-    extracted = extract_official_maps(bundles_dir, Path(args.output))
+    extracted = extract_official_maps(
+        bundles_dir, Path(args.output), beat_saber_path=Path(args.beat_saber),
+    )
     print(f"Extracted {len(extracted)} map folders to {args.output}")
 
 
@@ -166,6 +168,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
     from beat_weaver.model.config import ModelConfig
     from beat_weaver.model.exporter import export_notes
     from beat_weaver.model.inference import generate_full_song
+    from beat_weaver.model.obstacles import generate_obstacles, load_obstacle_stats
     from beat_weaver.model.transformer import BeatWeaverModel
 
     ckpt_dir = Path(args.checkpoint)
@@ -195,17 +198,30 @@ def cmd_generate(args: argparse.Namespace) -> None:
     mel = beat_align_spectrogram(mel, sr=sr, hop_length=config.hop_length, bpm=bpm)
     mel_tensor = torch.from_numpy(mel)
 
-    notes = generate_full_song(
+    all_events = generate_full_song(
         model, mel_tensor, args.difficulty, config, bpm,
         temperature=args.temperature,
         seed=args.seed,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
+    # decode_tokens (called inside generate_full_song) represents bombs as
+    # color=3 Note entries — split them back out before obstacle placement/export.
+    notes = [n for n in all_events if n.color in (0, 1)]
+    bombs = [n for n in all_events if n.color == 3]
+
+    obstacles = []
+    if not args.no_obstacles:
+        stats = load_obstacle_stats(Path(args.obstacle_stats)) if args.obstacle_stats else None
+        obstacles = generate_obstacles(notes, bombs, bpm, args.difficulty, stats=stats)
+
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")
-    export_notes(notes, bpm, song_name, Path(args.audio), output, args.difficulty)
-    print(f"Generated map: {output} ({n_windows} window(s), {len(notes)} notes)")
+    export_notes(notes + bombs, bpm, song_name, Path(args.audio), output, args.difficulty, obstacles=obstacles)
+    print(
+        f"Generated map: {output} ({n_windows} window(s), {len(notes)} notes, "
+        f"{len(bombs)} bombs, {len(obstacles)} obstacles)"
+    )
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
@@ -237,15 +253,22 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         mel, tokens, mask = test_ds[i]
         sample = test_ds.samples[i]
 
-        gen_tokens = generate(model, mel, sample["difficulty"], config, temperature=0)
-        gen_notes = decode_tokens(gen_tokens, sample["bpm"])
+        # Greedy decoding (temperature=0) degenerates into a repetition trap for
+        # this model — it gets stuck predicting BAR/POS_EMPTY forever and never
+        # places a note or reaches END. Sample instead (matching production
+        # generate() defaults), with a per-sample fixed seed for reproducible
+        # evaluation runs.
+        gen_tokens = generate(model, mel, sample["difficulty"], config, temperature=1.0, seed=i)
+        gen_notes = decode_tokens(gen_tokens, sample["bpm"], include_bombs=config.include_bombs)
+        # Exclude decoded bomb entries (color=3) from both sides for an
+        # apples-to-apples color-note comparison.
+        gen_notes = [n for n in gen_notes if n.color in (0, 1)]
 
-        from beat_weaver.schemas.normalized import Note
-        ref_notes = [
-            Note(beat=n["beat"], time_seconds=n["time_seconds"],
-                 x=n["x"], y=n["y"], color=n["color"], cut_direction=n["cut_direction"])
-            for n in sample["notes"]
-        ]
+        # dataset.py frees the raw `notes` dicts after tokenization (memory
+        # optimization for training) — reconstruct reference notes from the
+        # already-kept token_ids instead of the (no longer present) raw notes.
+        ref_notes = decode_tokens(sample["token_ids"], sample["bpm"], include_bombs=config.include_bombs)
+        ref_notes = [n for n in ref_notes if n.color in (0, 1)]
 
         metrics = evaluate_map(gen_notes, ref_notes, sample["bpm"])
         metrics["song_hash"] = sample["song_hash"]
@@ -255,6 +278,21 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     output_path = Path(args.output) if args.output else Path("evaluation_results.json")
     output_path.write_text(_json.dumps(results, indent=2), encoding="utf-8")
     print(f"Evaluated {len(results)} maps. Results: {output_path}")
+
+
+def cmd_analyze_obstacles(args: argparse.Namespace) -> None:
+    from beat_weaver.model.obstacles import mine_obstacle_stats, save_obstacle_stats
+
+    stats = mine_obstacle_stats(Path(args.data))
+    save_obstacle_stats(stats, Path(args.output))
+
+    print(f"{'Difficulty':<12} {'per_min':>8} {'dur_beats':>10} {'width':>6} {'crouch%':>8}")
+    for difficulty, s in stats.items():
+        print(
+            f"{difficulty:<12} {s['per_minute']:>8.2f} {s['duration_beats']:>10.2f} "
+            f"{s['width']:>6} {s['crouch_fraction'] * 100:>7.1f}%"
+        )
+    print(f"Saved to {args.output}")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -353,6 +391,17 @@ def main() -> None:
                      help="Song BPM (auto-detected from audio if not provided)")
     gen.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     gen.add_argument("--seed", type=int, default=None, help="Random seed")
+    gen.add_argument("--no-obstacles", action="store_true",
+                     help="Skip rule-based wall/obstacle placement")
+    gen.add_argument("--obstacle-stats", default="data/processed/obstacle_stats.json",
+                     help="Mined obstacle stats JSON from 'analyze-obstacles' "
+                          "(falls back to built-in defaults if missing)")
+
+    # analyze-obstacles
+    ao = sub.add_parser("analyze-obstacles", help="Mine wall/obstacle placement stats from processed data")
+    ao.add_argument("--data", default="data/processed", help="Processed data directory")
+    ao.add_argument("--output", default="data/processed/obstacle_stats.json",
+                    help="Output stats JSON path")
 
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")
@@ -375,6 +424,7 @@ def main() -> None:
         "run": cmd_run,
         "train": cmd_train,
         "generate": cmd_generate,
+        "analyze-obstacles": cmd_analyze_obstacles,
         "evaluate": cmd_evaluate,
     }
 

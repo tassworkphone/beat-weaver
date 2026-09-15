@@ -296,15 +296,38 @@ def read_notes_parquet(path: Path) -> pa.Table:
     Accepts either a single ``.parquet`` file or a directory containing
     ``notes_*.parquet`` files.
     """
+    return _read_parquet_glob(path, "notes")
+
+
+def read_bombs_parquet(path: Path) -> pa.Table:
+    """Read bombs Parquet file(s) and return a single Arrow table.
+
+    Accepts either a single ``.parquet`` file or a directory containing
+    ``bombs_*.parquet`` files.
+    """
+    return _read_parquet_glob(path, "bombs")
+
+
+def read_obstacles_parquet(path: Path) -> pa.Table:
+    """Read obstacles Parquet file(s) and return a single Arrow table.
+
+    Accepts either a single ``.parquet`` file or a directory containing
+    ``obstacles_*.parquet`` files.
+    """
+    return _read_parquet_glob(path, "obstacles")
+
+
+def _read_parquet_glob(path: Path, prefix: str) -> pa.Table:
+    """Shared implementation for read_notes_parquet/read_bombs_parquet/read_obstacles_parquet."""
     path = Path(path)
     if path.is_dir():
-        files = sorted(path.glob("notes_*.parquet"))
+        files = sorted(path.glob(f"{prefix}_*.parquet"))
         if not files:
             # Backward compat: try single-file layout
-            single = path / "notes.parquet"
+            single = path / f"{prefix}.parquet"
             if single.exists():
                 return pq.read_table(single)
-            raise FileNotFoundError(f"No notes Parquet files in {path}")
+            raise FileNotFoundError(f"No {prefix} Parquet files in {path}")
         tables = [pq.read_table(f) for f in files]
         return pa.concat_tables(tables)
     return pq.read_table(path)

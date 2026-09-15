@@ -25,6 +25,7 @@ from beat_weaver.model.audio import (
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.tokenizer import encode_beatmap
 from beat_weaver.schemas.normalized import (
+    Bomb,
     DifficultyInfo,
     Note,
     NormalizedBeatmap,
@@ -221,7 +222,7 @@ class BeatSaberDataset(Dataset):
         self.mel_cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Load notes from Parquet using pandas groupby (vectorized)
-        from beat_weaver.storage.writer import read_notes_parquet
+        from beat_weaver.storage.writer import read_bombs_parquet, read_notes_parquet
 
         table = read_notes_parquet(self.processed_dir)
         df = table.to_pandas()
@@ -229,6 +230,23 @@ class BeatSaberDataset(Dataset):
         # Ensure angle_offset column exists
         if "angle_offset" not in df.columns:
             df["angle_offset"] = 0
+
+        # Load bombs (opt-in) — grouped the same way as notes, keyed for lookup below.
+        # Bombs are much rarer than notes, so a dataset/filter combo with zero bombs
+        # anywhere is a legitimate (if unlucky) outcome, not an error.
+        bombs_by_key: dict[tuple[str, str, str], list[dict]] = {}
+        if config.include_bombs:
+            try:
+                bombs_table = read_bombs_parquet(self.processed_dir)
+                bombs_df = bombs_table.to_pandas()
+                bomb_cols = ["beat", "time_seconds", "x", "y"]
+                for key, group in bombs_df.groupby(["song_hash", "difficulty", "characteristic"]):
+                    bombs_by_key[key] = group[bomb_cols].to_dict("records")
+            except FileNotFoundError:
+                logger.warning(
+                    "config.include_bombs is set but no bombs Parquet files exist in %s",
+                    self.processed_dir,
+                )
 
         # Group notes by (song_hash, difficulty, characteristic)
         self.samples: list[dict] = []
@@ -268,6 +286,7 @@ class BeatSaberDataset(Dataset):
                 "difficulty": difficulty,
                 "characteristic": characteristic,
                 "notes": note_dicts,
+                "bombs": bombs_by_key.get((song_hash, difficulty, characteristic), []),
                 "bpm": bpm,
                 "source": meta.get("source", "unknown"),
                 "score": meta.get("score"),
@@ -303,6 +322,11 @@ class BeatSaberDataset(Dataset):
                 skipped_samples += 1
                 sample["_skip"] = True
                 continue
+            bombs = [
+                Bomb(beat=b["beat"], time_seconds=b["time_seconds"], x=b["x"], y=b["y"])
+                for b in sample.get("bombs", [])
+                if 0 <= b["x"] < 4 and 0 <= b["y"] < 3
+            ] if self.config.include_bombs else []
             meta = self.metadata.get(sample["song_hash"], {})
             beatmap = NormalizedBeatmap(
                 metadata=SongMetadata(
@@ -319,8 +343,9 @@ class BeatSaberDataset(Dataset):
                     note_jump_offset=0.0,
                 ),
                 notes=notes,
+                bombs=bombs,
             )
-            token_ids = encode_beatmap(beatmap)
+            token_ids = encode_beatmap(beatmap, include_bombs=self.config.include_bombs)
 
             # Truncate or pad tokens
             max_len = self.config.max_seq_len

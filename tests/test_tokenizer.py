@@ -6,6 +6,9 @@ import pytest
 
 from beat_weaver.model.tokenizer import (
     BAR,
+    BOMB_BASE,
+    BOMB_COUNT,
+    BOMB_EMPTY,
     DIFF_EASY,
     DIFF_EXPERT,
     DIFF_EXPERT_PLUS,
@@ -19,7 +22,10 @@ from beat_weaver.model.tokenizer import (
     RIGHT_EMPTY,
     START,
     VOCAB_SIZE,
+    VOCAB_SIZE_WITH_BOMBS,
+    _decode_bomb_token,
     _decode_note_token,
+    _encode_bomb_token,
     _encode_note_token,
     _quantize_beat,
     decode_tokens,
@@ -27,8 +33,10 @@ from beat_weaver.model.tokenizer import (
     difficulty_to_token,
     encode_beatmap,
     token_to_difficulty,
+    vocab_size,
 )
 from beat_weaver.schemas.normalized import (
+    Bomb,
     DifficultyInfo,
     Note,
     NormalizedBeatmap,
@@ -36,7 +44,9 @@ from beat_weaver.schemas.normalized import (
 )
 
 
-def _make_beatmap(difficulty: str, notes: list[Note]) -> NormalizedBeatmap:
+def _make_beatmap(
+    difficulty: str, notes: list[Note], bombs: list[Bomb] | None = None,
+) -> NormalizedBeatmap:
     return NormalizedBeatmap(
         metadata=SongMetadata(source="test", source_id="test", bpm=120.0),
         difficulty_info=DifficultyInfo(
@@ -47,6 +57,7 @@ def _make_beatmap(difficulty: str, notes: list[Note]) -> NormalizedBeatmap:
             note_jump_offset=0.0,
         ),
         notes=notes,
+        bombs=bombs or [],
     )
 
 
@@ -270,3 +281,81 @@ class TestDescribeToken:
         tok = _encode_note_token(LEFT_BASE, 2, 1, 3)
         info = describe_token(tok)
         assert "LEFT(2,1,d=3)" == info.name
+
+
+class TestBombTokens:
+    def test_vocab_size_with_bombs(self):
+        assert VOCAB_SIZE_WITH_BOMBS == BOMB_BASE + BOMB_COUNT == 304
+        assert vocab_size(include_bombs=False) == VOCAB_SIZE
+        assert vocab_size(include_bombs=True) == VOCAB_SIZE_WITH_BOMBS
+
+    def test_bomb_token_round_trip_all_positions(self):
+        for x in range(4):
+            for y in range(3):
+                tok = _encode_bomb_token(x, y)
+                rx, ry = _decode_bomb_token(tok)
+                assert (rx, ry) == (x, y)
+                assert BOMB_BASE <= tok < BOMB_BASE + BOMB_COUNT
+
+    def test_encode_ignores_bombs_when_disabled(self):
+        """Without include_bombs, bombs are silently dropped — no BOMB tokens emitted."""
+        note = Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1)
+        bomb = Bomb(beat=0.0, time_seconds=0.0, x=3, y=2)
+        bm = _make_beatmap("Expert", [note], bombs=[bomb])
+        tokens = encode_beatmap(bm, include_bombs=False)
+        assert BOMB_EMPTY not in tokens
+        assert not any(BOMB_BASE <= t < BOMB_BASE + BOMB_COUNT for t in tokens)
+
+    def test_bomb_at_note_position(self):
+        """A bomb sharing a position with a note emits POS LEFT RIGHT BOMB."""
+        note = Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1)
+        bomb = Bomb(beat=0.0, time_seconds=0.0, x=3, y=2)
+        bm = _make_beatmap("Expert", [note], bombs=[bomb])
+        tokens = encode_beatmap(bm, include_bombs=True)
+
+        assert tokens[3] == POS_BASE + 0
+        assert tokens[4] == _encode_note_token(LEFT_BASE, 1, 0, 1)
+        assert tokens[5] == RIGHT_EMPTY
+        assert tokens[6] == _encode_bomb_token(3, 2)
+        assert tokens[7] == END
+
+    def test_bomb_only_position_still_emits_empty_notes(self):
+        """A bomb with no note at that beat still gets a full POS LEFT RIGHT BOMB slot."""
+        bomb = Bomb(beat=1.0, time_seconds=0.5, x=0, y=0)
+        bm = _make_beatmap("Expert", [], bombs=[bomb])
+        tokens = encode_beatmap(bm, include_bombs=True)
+
+        assert tokens == [
+            START, DIFF_EXPERT, BAR, POS_BASE + 16,
+            LEFT_EMPTY, RIGHT_EMPTY, _encode_bomb_token(0, 0), END,
+        ]
+
+    def test_no_bomb_at_position_emits_bomb_empty(self):
+        note = Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1)
+        bm = _make_beatmap("Expert", [note], bombs=[])
+        tokens = encode_beatmap(bm, include_bombs=True)
+        assert tokens[6] == BOMB_EMPTY
+
+    def test_decode_round_trip_with_bombs(self):
+        note = Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1)
+        bomb = Bomb(beat=1.0, time_seconds=0.5, x=2, y=1)
+        bm = _make_beatmap("Expert", [note], bombs=[bomb])
+        tokens = encode_beatmap(bm, include_bombs=True)
+        decoded = decode_tokens(tokens, bpm=120.0, include_bombs=True)
+
+        assert len(decoded) == 2
+        decoded_note = next(n for n in decoded if n.color == 0)
+        decoded_bomb = next(n for n in decoded if n.color == 3)
+        assert (decoded_note.x, decoded_note.y) == (1, 0)
+        assert (decoded_bomb.x, decoded_bomb.y) == (2, 1)
+        assert decoded_bomb.beat == pytest.approx(1.0)
+
+    def test_decode_default_still_bomb_unaware(self):
+        """decode_tokens()'s default (include_bombs=False) is unchanged — a plain
+        bomb-free sequence decodes exactly as it did before this feature existed."""
+        original = Note(beat=0.0, time_seconds=0.0, x=2, y=1, color=0, cut_direction=3)
+        bm = _make_beatmap("Expert", [original])
+        tokens = encode_beatmap(bm)
+        decoded = decode_tokens(tokens, bpm=120.0)
+        assert len(decoded) == 1
+        assert decoded[0].color == 0

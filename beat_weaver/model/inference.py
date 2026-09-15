@@ -8,6 +8,9 @@ import torch.nn.functional as F
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.tokenizer import (
     BAR,
+    BOMB_BASE,
+    BOMB_COUNT,
+    BOMB_EMPTY,
     DIFF_EASY,
     DIFF_EXPERT_PLUS,
     END,
@@ -21,6 +24,7 @@ from beat_weaver.model.tokenizer import (
     RIGHT_EMPTY,
     START,
     VOCAB_SIZE,
+    VOCAB_SIZE_WITH_BOMBS,
     decode_tokens,
     difficulty_to_token,
 )
@@ -28,26 +32,34 @@ from beat_weaver.model.transformer import BeatWeaverModel
 from beat_weaver.schemas.normalized import Note
 
 
-def _build_grammar_mask(last_token: int, last_pos_in_bar: int = -1) -> torch.Tensor:
+def _build_grammar_mask(
+    last_token: int, last_pos_in_bar: int = -1, include_bombs: bool = False,
+) -> torch.Tensor:
     """Build a boolean mask over the vocabulary for valid next tokens.
 
-    Returns a tensor of shape (VOCAB_SIZE,) where True = allowed.
+    Returns a tensor of shape (vocab_size,) where True = allowed.
 
     Args:
         last_token: The most recently generated token.
         last_pos_in_bar: The last POS offset used in the current bar (-1 if none).
             Used to enforce strictly increasing positions within a bar,
             preventing multiple notes at the same beat.
+        include_bombs: Must match the model's config.include_bombs — inserts a
+            required BOMB slot between RIGHT and the next POS/BAR/END.
 
-    Grammar rules:
+    Grammar rules (include_bombs=False):
         START      → DIFF_*
         DIFF_*     → BAR
         BAR        → POS_* | BAR | END
         POS_*      → LEFT_* | LEFT_EMPTY
         LEFT_*     → RIGHT_* | RIGHT_EMPTY
         RIGHT_*    → POS_* (strictly >) | BAR | END
+
+    With include_bombs=True, RIGHT_* instead transitions to BOMB_*/BOMB_EMPTY,
+    which then transitions to POS_*/BAR/END.
     """
-    mask = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    vocab_size = VOCAB_SIZE_WITH_BOMBS if include_bombs else VOCAB_SIZE
+    mask = torch.zeros(vocab_size, dtype=torch.bool)
 
     if last_token == START:
         # After START → only difficulty tokens
@@ -74,8 +86,22 @@ def _build_grammar_mask(last_token: int, last_pos_in_bar: int = -1) -> torch.Ten
         mask[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = True
 
     elif last_token == RIGHT_EMPTY or (RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT):
-        # After RIGHT → POS (strictly increasing), BAR, or END
-        # Only allow POS tokens with offset > last_pos_in_bar
+        if include_bombs:
+            # After RIGHT → BOMB or BOMB_EMPTY
+            mask[BOMB_EMPTY] = True
+            mask[BOMB_BASE: BOMB_BASE + BOMB_COUNT] = True
+        else:
+            # After RIGHT → POS (strictly increasing), BAR, or END
+            min_next = last_pos_in_bar + 1
+            if min_next < POS_COUNT:
+                mask[POS_BASE + min_next: POS_BASE + POS_COUNT] = True
+            mask[BAR] = True
+            mask[END] = True
+
+    elif include_bombs and (
+        last_token == BOMB_EMPTY or (BOMB_BASE <= last_token < BOMB_BASE + BOMB_COUNT)
+    ):
+        # After BOMB → POS (strictly increasing), BAR, or END
         min_next = last_pos_in_bar + 1
         if min_next < POS_COUNT:
             mask[POS_BASE + min_next: POS_BASE + POS_COUNT] = True
@@ -179,7 +205,9 @@ def generate(
         next_logits = logits[0, -1]  # (vocab_size,)
 
         # Apply grammar mask (with position tracking for one-note-per-color-per-beat)
-        grammar_mask = _build_grammar_mask(tokens[-1], last_pos_in_bar).to(device)
+        grammar_mask = _build_grammar_mask(
+            tokens[-1], last_pos_in_bar, include_bombs=config.include_bombs,
+        ).to(device)
         next_logits[~grammar_mask] = float("-inf")
 
         # Sample
@@ -239,7 +267,7 @@ def generate_full_song(
             model, mel_spectrogram, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
         )
-        return decode_tokens(tokens, bpm)
+        return decode_tokens(tokens, bpm, include_bombs=config.include_bombs)
 
     # Multi-window generation
     overlap = min(max_len // 4, 1024)
@@ -274,7 +302,7 @@ def generate_full_song(
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
-        window_notes = decode_tokens(tokens, bpm)
+        window_notes = decode_tokens(tokens, bpm, include_bombs=config.include_bombs)
 
         # Offset all beats by the window's start position in frames
         # Each frame = 1/16th note subdivision, beat = frame / 16

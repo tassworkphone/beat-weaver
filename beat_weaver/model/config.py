@@ -68,6 +68,9 @@ class ModelConfig:
     density_loss_weight: float = 0.1
     color_balance_weight: float = 0.0  # Weight for color balance auxiliary loss
 
+    # Bombs
+    include_bombs: bool = False  # Emit a BOMB token slot per position (bumps vocab_size)
+
     def save(self, path: Path) -> None:
         """Save config to JSON file."""
         path = Path(path)
