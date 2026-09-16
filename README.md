@@ -55,7 +55,7 @@ beat-weaver download --min-score 0.75 --output data/raw/beatsaver
 
 ### Step 2: Extract official maps (optional)
 
-If you have Beat Saber installed via Steam, you can also extract the 214 official/DLC maps. These are higher quality and weighted at 20% of each training batch.
+If you have Beat Saber installed via Steam, you can also extract the official/DLC maps you already own. These are higher quality and weighted at 20% of each training batch.
 
 ```bash
 # Windows (default Steam path)
@@ -64,6 +64,8 @@ beat-weaver extract-official --output data/raw/official
 # Custom install path
 beat-weaver extract-official --beat-saber "/path/to/Beat Saber" --output data/raw/official
 ```
+
+> **Note on official/DLC data:** these maps are Beat Saber's copyrighted content, extracted here only from an install you already own, for your own local experiments. A checkpoint (or generated maps) trained using this data is fine for personal use, but shouldn't be redistributed or shared — that's a call each user needs to make for themselves. This project documents how the mechanism works (extraction, oversampling, mined placement stats), not a recommendation to include official content in a model you plan to share.
 
 ### Step 3: Process raw maps into Parquet
 

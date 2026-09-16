@@ -16,7 +16,7 @@ Given an audio file as input, the system generates block positions and orientati
 6. **Full-Song Generation** (complete) — Windowed inference with overlap stitching for songs of any length
 7. **Bombs** (complete) — Model-native compound token (`include_bombs` config flag, opt-in, vocab 291→304)
 8. **Walls/Obstacles** (complete) — Rule-based post-processing (`beat_weaver.model.obstacles`), stats mined from real Parquet data with outlier filtering (community "wall art" maps pollute raw obstacle data — see Open Questions)
-9. **Official DLC as training data** (complete) — `extract-official` pulls base game + all owned DLC (332 levels extracted from a full-DLC install, far more than the original 214); official maps get oversampled via `official_ratio` for quality/consistency
+9. **Official DLC as training data** (complete) — `extract-official` pulls base game + all owned DLC (332 levels extracted from a full-DLC install, far more than the original 214); official maps get oversampled via `official_ratio` for quality/consistency. **Personal use only** — official/DLC maps are Beat Saber's copyrighted content, extracted only from an install the user already owns; a checkpoint (or generated maps) trained using this data shouldn't be redistributed or shared. Docs here describe how the mechanism works, not a recommendation for what to include in a model meant to be shared — that call is left to whoever's building it.
 10. **Arcs** (data pipeline + rule-based generator complete; exporter wiring pending — see Open Questions) / **Chains** (not started, no validated approach yet)
 11. **Feedback System / Self-Improvement Loop** (future) — See Open Questions
 
