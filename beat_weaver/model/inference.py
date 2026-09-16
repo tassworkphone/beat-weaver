@@ -23,6 +23,7 @@ from beat_weaver.model.tokenizer import (
     RIGHT_COUNT,
     RIGHT_EMPTY,
     START,
+    SUBDIVISIONS_PER_BAR,
     VOCAB_SIZE,
     VOCAB_SIZE_WITH_BOMBS,
     decode_tokens,
@@ -115,6 +116,31 @@ def _build_grammar_mask(
     return mask
 
 
+# Generous per-bar token allowance for sizing the generation budget: 1 BAR
+# token + up to ~6 active note positions, each up to 4 tokens (POS/LEFT/
+# RIGHT/BOMB). Real maps essentially never exceed this even at ExpertPlus
+# density, so this is a safety margin, not a typical case.
+_TOKENS_PER_BAR_BUDGET = 25
+
+
+def _max_generation_tokens(n_frames: int, max_seq_len: int) -> int:
+    """Token budget for one generate() call, sized to the window it covers.
+
+    config.max_seq_len (the training-time sequence length) is too small to
+    guarantee covering a full audio window at anything but low note density:
+    a max_audio_len=4096 window spans 64 bars, and the grammar requires one
+    BAR token per bar plus per-note tokens — a moderately dense window can
+    exceed 1024 tokens well before the last bar, silently truncating the
+    back half of the window (which is exactly the half kept by
+    generate_full_song's midpoint-ownership stitching, producing dead gaps
+    followed by a pile-up wherever the next window happens to catch up).
+    Scale the budget to the window's actual bar count instead, using
+    max_seq_len only as a floor so short single-window songs are unaffected.
+    """
+    bars_in_window = max(1, -(-n_frames // SUBDIVISIONS_PER_BAR))  # ceil div
+    return max(max_seq_len, 4 + bars_in_window * _TOKENS_PER_BAR_BUDGET)
+
+
 def _sample_with_filter(
     logits: torch.Tensor,
     temperature: float = 1.0,
@@ -195,7 +221,8 @@ def generate(
     tokens = [START, diff_token]
     last_pos_in_bar = -1  # Track last POS offset in current bar
 
-    for _ in range(config.max_seq_len - 2):
+    max_tokens = _max_generation_tokens(mel_spectrogram.shape[1], config.max_seq_len)
+    for _ in range(max_tokens - 2):
         # Prepare decoder input
         token_tensor = torch.tensor([tokens], dtype=torch.long, device=device)
         token_mask = torch.ones(1, len(tokens), dtype=torch.bool, device=device)
@@ -287,11 +314,18 @@ def generate_full_song(
     for i, start in enumerate(starts):
         end = start + max_len
         window_mel = mel_spectrogram[:, start:end]
+        valid_len = window_mel.shape[1]
 
-        # Zero-pad last window if needed
-        if window_mel.shape[1] < max_len:
-            pad_size = max_len - window_mel.shape[1]
+        # Zero-pad last window if needed, and mask the padded tail so the
+        # encoder doesn't attend to it as if it were real (very quiet) audio —
+        # unmasked padding previously let the model generate a long tail of
+        # notes over pure silence past the real end of the song.
+        window_mask = None
+        if valid_len < max_len:
+            pad_size = max_len - valid_len
             window_mel = torch.nn.functional.pad(window_mel, (0, pad_size))
+            window_mask = torch.zeros(max_len, dtype=torch.bool)
+            window_mask[:valid_len] = True
 
         # Use different seed per window for variety (if seed provided)
         window_seed = seed + i if seed is not None else None
@@ -299,6 +333,7 @@ def generate_full_song(
         tokens = generate(
             model, window_mel, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=window_seed,
+            mel_mask=window_mask,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
@@ -334,6 +369,11 @@ def generate_full_song(
             max_beat = overlap_mid_frame / 16.0
 
         result.extend(n for n in notes if min_beat <= n.beat < max_beat)
+
+    # Hard safety net: never emit notes past the real (unpadded) audio length,
+    # regardless of what the last, heavily-padded window generated.
+    song_end_beat = total_frames / 16.0
+    result = [n for n in result if n.beat < song_end_beat]
 
     result.sort(key=lambda n: (n.beat, n.color))
     return result

@@ -5,7 +5,12 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from beat_weaver.model.config import ModelConfig
-from beat_weaver.model.inference import _build_grammar_mask, generate, generate_full_song
+from beat_weaver.model.inference import (
+    _build_grammar_mask,
+    _max_generation_tokens,
+    generate,
+    generate_full_song,
+)
 from beat_weaver.model.tokenizer import (
     BAR,
     BOMB_BASE,
@@ -123,6 +128,37 @@ class TestGrammarMask:
         mask_explicit = _build_grammar_mask(RIGHT_BASE + 5, include_bombs=False)
         assert mask_default.shape == mask_explicit.shape == (VOCAB_SIZE,)
         assert torch.equal(mask_default, mask_explicit)
+
+
+class TestMaxGenerationTokens:
+    """Regression coverage for the windowed-generation truncation bug: a fixed
+    max_seq_len=1024 token budget can't always cover a full max_audio_len=4096
+    window (64 bars) at real note density, silently dropping the back half of
+    the window — exactly the half kept by generate_full_song's midpoint
+    ownership, producing dead gaps followed by a pile-up.
+    """
+
+    def test_small_window_floors_at_max_seq_len(self):
+        # 1 bar (64 frames) needs far fewer than max_seq_len tokens — the
+        # floor should win, leaving short single-window songs unaffected.
+        assert _max_generation_tokens(n_frames=64, max_seq_len=1024) == 1024
+
+    def test_full_size_window_exceeds_max_seq_len(self):
+        # 4096 frames = 64 bars; at 25 tokens/bar that's 1604, well past 1024.
+        budget = _max_generation_tokens(n_frames=4096, max_seq_len=1024)
+        assert budget > 1024
+
+    def test_scales_with_bar_count(self):
+        small = _max_generation_tokens(n_frames=64, max_seq_len=1)
+        large = _max_generation_tokens(n_frames=4096, max_seq_len=1)
+        assert large > small
+
+    def test_partial_bar_rounds_up(self):
+        # 65 frames is just over 1 bar (64 frames) — must budget for 2 bars,
+        # not truncate down to 1.
+        one_bar = _max_generation_tokens(n_frames=64, max_seq_len=1)
+        two_bars = _max_generation_tokens(n_frames=65, max_seq_len=1)
+        assert two_bars > one_bar
 
 
 class TestGenerate:
@@ -282,6 +318,23 @@ class TestGenerateFullSong:
         # the function should run without errors and return Note objects
         for note in notes:
             assert hasattr(note, "beat")
+
+    def test_full_song_no_notes_past_real_audio_length(self, small_model):
+        """Regression: the last window is zero-padded up to max_audio_len, so
+        without masking/clipping the model could generate notes over pure
+        padding, well past the real song's end. total_frames here (2.5x
+        max_audio_len) is NOT a multiple of max_audio_len, so the last window
+        is genuinely partial/padded — no note should land beyond it."""
+        model, config = small_model
+        total_frames = int(config.max_audio_len * 2.5)
+        mel = torch.randn(80, total_frames)
+        notes = generate_full_song(
+            model, mel, "Expert", config, bpm=120.0,
+            temperature=1.0, seed=42,
+        )
+        song_end_beat = total_frames / 16.0
+        for note in notes:
+            assert note.beat < song_end_beat
             assert note.beat >= 0
 
     def test_full_song_overlap_no_duplicates(self, small_model):
