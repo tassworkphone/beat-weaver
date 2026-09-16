@@ -260,6 +260,7 @@ class BeatSaberDataset(Dataset):
 
         # Prepare filtering thresholds from config
         min_diff_rank = self._DIFF_RANK.get(config.min_difficulty, 1)
+        max_diff_rank = self._DIFF_RANK.get(config.max_difficulty, 9)
         allowed_chars = set(config.characteristics) if config.characteristics else None
         filtered_counts = {"difficulty": 0, "characteristic": 0, "bpm": 0}
 
@@ -269,7 +270,8 @@ class BeatSaberDataset(Dataset):
             if song_hash not in self.audio_manifest:
                 continue
             # Apply config-driven filters
-            if self._DIFF_RANK.get(difficulty, 0) < min_diff_rank:
+            difficulty_rank = self._DIFF_RANK.get(difficulty, 0)
+            if difficulty_rank < min_diff_rank or difficulty_rank > max_diff_rank:
                 filtered_counts["difficulty"] += 1
                 continue
             if allowed_chars and characteristic not in allowed_chars:

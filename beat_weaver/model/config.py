@@ -51,6 +51,8 @@ class ModelConfig:
 
     # Data filtering
     min_difficulty: str = "Easy"  # Minimum difficulty to include
+    max_difficulty: str = "ExpertPlus"  # Maximum difficulty to include (set equal to
+    # min_difficulty to train on exactly one difficulty level)
     characteristics: list[str] | None = None  # None = all; ["Standard"] = Standard only
     min_bpm: float = 0.0
     max_bpm: float = 9999.0

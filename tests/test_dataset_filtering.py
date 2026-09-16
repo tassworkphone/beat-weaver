@@ -136,6 +136,54 @@ class TestFilterByDifficulty:
         # Should include multiple difficulty levels
         assert len(diffs) >= 2
 
+    def test_max_difficulty_excludes_above(self, tmp_path):
+        """Only Easy/Normal samples when max_difficulty='Normal'."""
+        processed, manifest = _make_simple_dataset(
+            tmp_path,
+            difficulties=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
+            characteristics=["Standard"] * 5,
+            bpms=[120.0] * 5,
+        )
+        config = ModelConfig(max_difficulty="Normal", max_seq_len=64)
+        ds = BeatSaberDataset(processed, manifest, config, split="train")
+        diffs = {s["difficulty"] for s in ds.samples}
+        assert "Hard" not in diffs
+        assert "Expert" not in diffs
+        assert "ExpertPlus" not in diffs
+
+    def test_min_and_max_equal_isolates_one_difficulty(self, tmp_path):
+        """Setting min_difficulty == max_difficulty trains on exactly one level."""
+        processed, manifest = _make_simple_dataset(
+            tmp_path,
+            difficulties=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"] * 3,
+            characteristics=["Standard"] * 15,
+            bpms=[120.0] * 15,
+        )
+        config = ModelConfig(min_difficulty="Normal", max_difficulty="Normal", max_seq_len=64)
+        ds = BeatSaberDataset(processed, manifest, config, split="train")
+        diffs = {s["difficulty"] for s in ds.samples}
+        assert diffs == {"Normal"}
+        assert len(ds.samples) > 0
+
+    def test_default_max_difficulty_unaffected(self, tmp_path):
+        """Default max_difficulty ('ExpertPlus') must not filter anything out
+        — a regression check for configs created before this field existed.
+
+        Uses 3 songs per difficulty (15 total) so that with the 80/10/10
+        split's 2 excluded hashes, no difficulty can be fully eliminated from
+        train by chance — this is deterministic, not just probably true.
+        """
+        processed, manifest = _make_simple_dataset(
+            tmp_path,
+            difficulties=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"] * 3,
+            characteristics=["Standard"] * 15,
+            bpms=[120.0] * 15,
+        )
+        config = ModelConfig(max_seq_len=64)  # defaults for min/max_difficulty
+        ds = BeatSaberDataset(processed, manifest, config, split="train")
+        diffs = {s["difficulty"] for s in ds.samples}
+        assert diffs == {"Easy", "Normal", "Hard", "Expert", "ExpertPlus"}
+
 
 class TestFilterByCharacteristic:
     def test_standard_only(self, tmp_path):
