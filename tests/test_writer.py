@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from beat_weaver.schemas.normalized import (
+    Arc,
     Bomb,
     DifficultyInfo,
     Note,
@@ -13,6 +14,7 @@ from beat_weaver.schemas.normalized import (
 )
 from beat_weaver.storage.writer import (
     MAX_FILE_BYTES,
+    read_arcs_parquet,
     read_notes_parquet,
     write_parquet,
 )
@@ -41,6 +43,13 @@ def _make_beatmap(
     obstacles = [
         Obstacle(beat=1.0, time_seconds=0.5, duration_beats=2.0, x=0, y=0, width=1, height=3)
     ]
+    arcs = [
+        Arc(
+            beat=0.0, time_seconds=0.0, x=0, y=0, color=0, cut_direction=1,
+            head_multiplier=1.0, tail_beat=2.0, tail_time_seconds=1.0,
+            tail_x=3, tail_y=2, tail_cut_direction=0, tail_multiplier=1.0,
+        )
+    ]
     return NormalizedBeatmap(
         metadata=SongMetadata(
             source=source,
@@ -59,6 +68,7 @@ def _make_beatmap(
         notes=notes,
         bombs=bombs,
         obstacles=obstacles,
+        arcs=arcs,
     )
 
 
@@ -129,6 +139,18 @@ class TestWriteParquet:
         obstacles_files = list(tmp_path.glob("obstacles_*.parquet"))
         assert len(bombs_files) >= 1
         assert len(obstacles_files) >= 1
+
+    def test_arcs_written_and_readable(self, tmp_path):
+        """Arcs should also use numbered files and round-trip through the reader."""
+        beatmaps = [_make_beatmap("h1")]
+        write_parquet(beatmaps, tmp_path)
+
+        arcs_files = list(tmp_path.glob("arcs_*.parquet"))
+        assert len(arcs_files) >= 1
+
+        table = read_arcs_parquet(tmp_path)
+        assert table.num_rows == 1
+        assert table.column("tail_x").to_pylist() == [3]
 
 
 class TestFileSplitting:

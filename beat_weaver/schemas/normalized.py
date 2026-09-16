@@ -36,6 +36,30 @@ class Bomb:
 
 
 @dataclass
+class Arc:
+    """An arc (v3 "slider" / v4 "arc") connecting a head note to a tail note.
+
+    Vanilla-format arcs are v3+ only — no v2 equivalent exists, so v2 parsing
+    always yields an empty arc list.
+    """
+
+    beat: float  # head beat
+    time_seconds: float
+    x: int  # head column 0-3
+    y: int  # head row 0-2
+    color: int  # 0=Red/Left, 1=Blue/Right
+    cut_direction: int  # head cut direction, same enum as Note
+    head_multiplier: float  # head control point length multiplier ("mu")
+    tail_beat: float
+    tail_time_seconds: float
+    tail_x: int
+    tail_y: int
+    tail_cut_direction: int
+    tail_multiplier: float  # tail control point length multiplier ("tmu"/"tm")
+    mid_anchor_mode: int = 0  # 0=straight, 1=clockwise, 2=counter-clockwise ("m")
+
+
+@dataclass
 class Obstacle:
     """A wall/obstacle the player must dodge."""
 
@@ -60,6 +84,7 @@ class DifficultyInfo:
     note_count: int = 0  # filled after parsing
     bomb_count: int = 0
     obstacle_count: int = 0
+    arc_count: int = 0
     nps: float | None = None  # notes per second
 
 
@@ -89,4 +114,5 @@ class NormalizedBeatmap:
     difficulty_info: DifficultyInfo
     notes: list[Note] = field(default_factory=list)  # sorted by beat
     bombs: list[Bomb] = field(default_factory=list)  # sorted by beat
-    obstacles: list[Obstacle] = field(default_factory=list)  # sorted by beat
+    obstacles: list[Obstacle] = field(default_factory=list)
+    arcs: list[Arc] = field(default_factory=list)  # sorted by (head) beat  # sorted by beat

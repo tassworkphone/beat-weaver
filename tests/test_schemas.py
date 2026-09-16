@@ -3,8 +3,8 @@
 import json
 from beat_weaver.schemas.detection import detect_info_version, detect_beatmap_version
 from beat_weaver.schemas.v2 import parse_v2_notes, parse_v2_obstacles
-from beat_weaver.schemas.v3 import parse_v3_notes, parse_v3_obstacles
-from beat_weaver.schemas.v4 import parse_v4_notes, parse_v4_obstacles
+from beat_weaver.schemas.v3 import parse_v3_arcs, parse_v3_notes, parse_v3_obstacles
+from beat_weaver.schemas.v4 import parse_v4_arcs, parse_v4_notes, parse_v4_obstacles
 import pytest
 
 
@@ -103,6 +103,25 @@ class TestV3Parser:
         assert obstacles[0].height == 3
         assert obstacles[0].width == 1
 
+    def test_parse_arcs(self):
+        beatmap = {
+            "sliders": [
+                {"b": 87.5, "c": 0, "x": 0, "y": 1, "d": 4, "mu": 1, "tb": 89, "tx": 1, "ty": 0, "tc": 7, "tmu": 1, "m": 0},
+            ],
+        }
+        arcs = parse_v3_arcs(beatmap, bpm=120.0)
+        assert len(arcs) == 1
+        assert arcs[0].beat == 87.5
+        assert arcs[0].x == 0 and arcs[0].y == 1
+        assert arcs[0].color == 0
+        assert arcs[0].cut_direction == 4
+        assert arcs[0].tail_beat == 89
+        assert arcs[0].tail_x == 1 and arcs[0].tail_y == 0
+        assert arcs[0].tail_cut_direction == 7
+
+    def test_no_arcs_key_returns_empty(self):
+        assert parse_v3_arcs({}, bpm=120.0) == []
+
 
 class TestV4Parser:
     def test_parse_notes_with_deref(self):
@@ -152,3 +171,54 @@ class TestV4Parser:
         notes, _ = parse_v4_notes(beatmap, bpm=120.0)
         assert len(notes) == 3
         assert all(n.x == 1 for n in notes)
+
+    def test_parse_arcs_dereferences_notes_data(self):
+        beatmap = {
+            "colorNotesData": [
+                {"x": 3, "y": 1, "c": 1, "d": 5},  # index 0 (head)
+                {"x": 2, "c": 1, "d": 6},  # index 1 (tail), y omitted -> defaults to 0
+            ],
+            "arcs": [
+                {"hb": 74.0, "hi": 0, "tb": 76.0, "ti": 1},
+            ],
+            "arcsData": [
+                {"m": 1.0, "tm": 1.0},
+            ],
+        }
+        arcs = parse_v4_arcs(beatmap, bpm=120.0)
+        assert len(arcs) == 1
+        assert arcs[0].beat == 74.0
+        assert arcs[0].x == 3 and arcs[0].y == 1 and arcs[0].color == 1
+        assert arcs[0].tail_beat == 76.0
+        assert arcs[0].tail_x == 2 and arcs[0].tail_y == 0
+
+    def test_parse_arcs_uses_ai_index_into_arcs_data(self):
+        beatmap = {
+            "colorNotesData": [
+                {"x": 0, "y": 0, "c": 0, "d": 0},
+                {"x": 3, "y": 2, "c": 0, "d": 0},
+            ],
+            "arcs": [
+                {"hb": 0.0, "hi": 0, "tb": 2.0, "ti": 1, "ai": 1},
+            ],
+            "arcsData": [
+                {"m": 1.0, "tm": 1.0},
+                {"m": 0.5, "tm": 0.25, "a": 2},
+            ],
+        }
+        arcs = parse_v4_arcs(beatmap, bpm=120.0)
+        assert len(arcs) == 1
+        assert arcs[0].head_multiplier == pytest.approx(0.5)
+        assert arcs[0].tail_multiplier == pytest.approx(0.25)
+        assert arcs[0].mid_anchor_mode == 2
+
+    def test_parse_arcs_skips_out_of_range_head_index(self):
+        beatmap = {
+            "colorNotesData": [{"x": 0, "y": 0, "c": 0, "d": 0}],
+            "arcs": [{"hb": 0.0, "hi": 99, "tb": 2.0, "ti": 0}],
+            "arcsData": [],
+        }
+        assert parse_v4_arcs(beatmap, bpm=120.0) == []
+
+    def test_no_arcs_key_returns_empty(self):
+        assert parse_v4_arcs({}, bpm=120.0) == []

@@ -305,6 +305,21 @@ def cmd_analyze_obstacles(args: argparse.Namespace) -> None:
     print(f"Saved to {args.output}")
 
 
+def cmd_analyze_arcs(args: argparse.Namespace) -> None:
+    from beat_weaver.model.arcs import mine_arc_stats, save_arc_stats
+
+    stats = mine_arc_stats(Path(args.data))
+    save_arc_stats(stats, Path(args.output))
+
+    print(f"{'Difficulty':<12} {'per_min':>8} {'gap_min':>8} {'gap_max':>8} {'move_min':>9}")
+    for difficulty, s in stats.items():
+        print(
+            f"{difficulty:<12} {s['per_minute']:>8.2f} {s['time_gap_min']:>8.2f} "
+            f"{s['time_gap_max']:>8.2f} {s['movement_min']:>9.2f}"
+        )
+    print(f"Saved to {args.output}")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     from beat_weaver.pipeline.batch import PipelineConfig, run_pipeline
 
@@ -414,6 +429,12 @@ def main() -> None:
     ao.add_argument("--output", default="data/processed/obstacle_stats.json",
                     help="Output stats JSON path")
 
+    # analyze-arcs
+    aa = sub.add_parser("analyze-arcs", help="Mine arc/slider placement stats from processed data")
+    aa.add_argument("--data", default="data/processed", help="Processed data directory")
+    aa.add_argument("--output", default="data/processed/arc_stats.json",
+                    help="Output stats JSON path")
+
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")
     ev.add_argument("--checkpoint", required=True, help="Model checkpoint directory")
@@ -436,6 +457,7 @@ def main() -> None:
         "train": cmd_train,
         "generate": cmd_generate,
         "analyze-obstacles": cmd_analyze_obstacles,
+        "analyze-arcs": cmd_analyze_arcs,
         "evaluate": cmd_evaluate,
     }
 

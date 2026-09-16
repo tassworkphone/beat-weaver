@@ -4,7 +4,7 @@ V3 maps use short single-letter keys (b, x, y, c, d, a) and separate arrays
 for color notes, bomb notes, and obstacles.
 """
 
-from beat_weaver.schemas.normalized import Bomb, Note, Obstacle
+from beat_weaver.schemas.normalized import Arc, Bomb, Note, Obstacle
 
 
 def parse_v3_notes(beatmap: dict, bpm: float) -> tuple[list[Note], list[Bomb]]:
@@ -75,3 +75,41 @@ def parse_v3_obstacles(beatmap: dict, bpm: float) -> list[Obstacle]:
 
     obstacles.sort(key=lambda o: o.beat)
     return obstacles
+
+
+def parse_v3_arcs(beatmap: dict, bpm: float) -> list[Arc]:
+    """Parse arcs from a v3 beatmap.
+
+    V3 calls arcs "sliders" and stores head/tail fields inline (no dereferencing).
+
+    Args:
+        beatmap: Parsed JSON dict of a v3 difficulty file.
+        bpm: Beats per minute for time conversion.
+
+    Returns:
+        List of arcs sorted by head beat.
+    """
+    arcs: list[Arc] = []
+
+    for raw in beatmap.get("sliders", []):
+        beat = raw["b"]
+        tail_beat = raw.get("tb", beat)
+        arcs.append(Arc(
+            beat=beat,
+            time_seconds=beat * 60.0 / bpm,
+            x=raw.get("x", 0),
+            y=raw.get("y", 0),
+            color=raw.get("c", 0),
+            cut_direction=raw.get("d", 0),
+            head_multiplier=raw.get("mu", 1.0),
+            tail_beat=tail_beat,
+            tail_time_seconds=tail_beat * 60.0 / bpm,
+            tail_x=raw.get("tx", 0),
+            tail_y=raw.get("ty", 0),
+            tail_cut_direction=raw.get("tc", 0),
+            tail_multiplier=raw.get("tmu", 1.0),
+            mid_anchor_mode=raw.get("m", 0),
+        ))
+
+    arcs.sort(key=lambda a: a.beat)
+    return arcs

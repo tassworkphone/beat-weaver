@@ -5,7 +5,7 @@ contain beat timing and an index into separate data arrays that hold the
 position, color, and direction information.
 """
 
-from beat_weaver.schemas.normalized import Bomb, Note, Obstacle
+from beat_weaver.schemas.normalized import Arc, Bomb, Note, Obstacle
 
 
 def parse_v4_notes(beatmap: dict, bpm: float) -> tuple[list[Note], list[Bomb]]:
@@ -97,3 +97,61 @@ def parse_v4_obstacles(beatmap: dict, bpm: float) -> list[Obstacle]:
 
     obstacles.sort(key=lambda o: o.beat)
     return obstacles
+
+
+def parse_v4_arcs(beatmap: dict, bpm: float) -> list[Arc]:
+    """Parse arcs from a v4 beatmap.
+
+    V4 arcs reference their head/tail position+color+cutDirection indirectly:
+    `hi`/`ti` index into `colorNotesData` (the same array notes dereference into,
+    not the `colorNotes` timing array), and an optional `ai` indexes into
+    `arcsData` for the multiplier/anchor-mode fields (defaulting to index 0,
+    since most arcs share the default shape and only deviations get their own
+    `arcsData` entry).
+
+    Args:
+        beatmap: Parsed JSON dict of a v4 difficulty file.
+        bpm: Beats per minute for time conversion.
+
+    Returns:
+        List of arcs sorted by head beat.
+    """
+    arcs: list[Arc] = []
+
+    arc_entries = beatmap.get("arcs", [])
+    arcs_data = beatmap.get("arcsData", [])
+    notes_data = beatmap.get("colorNotesData", [])
+
+    for raw in arc_entries:
+        head_idx = raw.get("hi", -1)
+        if head_idx < 0 or head_idx >= len(notes_data):
+            continue
+        head_data = notes_data[head_idx]
+
+        tail_idx = raw.get("ti", head_idx)
+        tail_data = notes_data[tail_idx] if 0 <= tail_idx < len(notes_data) else head_data
+
+        arc_idx = raw.get("ai", 0)
+        extra = arcs_data[arc_idx] if 0 <= arc_idx < len(arcs_data) else {}
+
+        head_beat = raw.get("hb", 0.0)
+        tail_beat = raw.get("tb", head_beat)
+        arcs.append(Arc(
+            beat=head_beat,
+            time_seconds=head_beat * 60.0 / bpm,
+            x=head_data.get("x", 0),
+            y=head_data.get("y", 0),
+            color=head_data.get("c", 0),
+            cut_direction=head_data.get("d", 0),
+            head_multiplier=extra.get("m", 1.0),
+            tail_beat=tail_beat,
+            tail_time_seconds=tail_beat * 60.0 / bpm,
+            tail_x=tail_data.get("x", 0),
+            tail_y=tail_data.get("y", 0),
+            tail_cut_direction=tail_data.get("d", 0),
+            tail_multiplier=extra.get("tm", 1.0),
+            mid_anchor_mode=extra.get("a", 0),
+        ))
+
+    arcs.sort(key=lambda a: a.beat)
+    return arcs

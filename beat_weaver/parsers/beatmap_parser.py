@@ -8,8 +8,8 @@ from beat_weaver.parsers.info_parser import parse_info
 from beat_weaver.schemas.detection import detect_beatmap_version
 from beat_weaver.schemas.normalized import NormalizedBeatmap
 from beat_weaver.schemas.v2 import parse_v2_notes, parse_v2_obstacles
-from beat_weaver.schemas.v3 import parse_v3_notes, parse_v3_obstacles
-from beat_weaver.schemas.v4 import parse_v4_notes, parse_v4_obstacles
+from beat_weaver.schemas.v3 import parse_v3_arcs, parse_v3_notes, parse_v3_obstacles
+from beat_weaver.schemas.v4 import parse_v4_arcs, parse_v4_notes, parse_v4_obstacles
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,13 @@ _OBSTACLE_PARSERS = {
     "2": parse_v2_obstacles,
     "3": parse_v3_obstacles,
     "4": parse_v4_obstacles,
+}
+
+# No v2 equivalent exists for arcs (vanilla feature introduced in v3) — v2 maps
+# always yield an empty arc list rather than needing a dedicated no-op parser.
+_ARC_PARSERS = {
+    "3": parse_v3_arcs,
+    "4": parse_v4_arcs,
 }
 
 
@@ -66,10 +73,13 @@ def parse_map_folder(
 
             notes, bombs = parse_notes(beatmap_data, metadata.bpm)
             obstacles = parse_obstacles(beatmap_data, metadata.bpm)
+            parse_arcs = _ARC_PARSERS.get(version)
+            arcs = parse_arcs(beatmap_data, metadata.bpm) if parse_arcs else []
 
             diff_info.note_count = len(notes)
             diff_info.bomb_count = len(bombs)
             diff_info.obstacle_count = len(obstacles)
+            diff_info.arc_count = len(arcs)
             if metadata.bpm > 0 and notes:
                 duration = notes[-1].time_seconds - notes[0].time_seconds
                 if duration > 0:
@@ -81,6 +91,7 @@ def parse_map_folder(
                 notes=notes,
                 bombs=bombs,
                 obstacles=obstacles,
+                arcs=arcs,
             ))
         except Exception:
             logger.exception("Failed to parse %s", dat_path)

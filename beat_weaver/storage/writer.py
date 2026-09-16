@@ -64,6 +64,30 @@ OBSTACLES_SCHEMA = pa.schema(
     ]
 )
 
+ARCS_SCHEMA = pa.schema(
+    [
+        pa.field("song_hash", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("difficulty", pa.string()),
+        pa.field("characteristic", pa.string()),
+        pa.field("bpm", pa.float32()),
+        pa.field("beat", pa.float32()),
+        pa.field("time_seconds", pa.float32()),
+        pa.field("x", pa.int8()),
+        pa.field("y", pa.int8()),
+        pa.field("color", pa.int8()),
+        pa.field("cut_direction", pa.int8()),
+        pa.field("head_multiplier", pa.float32()),
+        pa.field("tail_beat", pa.float32()),
+        pa.field("tail_time_seconds", pa.float32()),
+        pa.field("tail_x", pa.int8()),
+        pa.field("tail_y", pa.int8()),
+        pa.field("tail_cut_direction", pa.int8()),
+        pa.field("tail_multiplier", pa.float32()),
+        pa.field("mid_anchor_mode", pa.int8()),
+    ]
+)
+
 
 # --- Public API --------------------------------------------------------------
 
@@ -137,6 +161,7 @@ def write_parquet(
       - notes_NNNN.parquet  (one or more)
       - bombs_NNNN.parquet  (one or more)
       - obstacles_NNNN.parquet  (one or more)
+      - arcs_NNNN.parquet  (one or more)
       - metadata.json
 
     Parameters
@@ -154,6 +179,7 @@ def write_parquet(
     notes_by_hash: dict[str, dict[str, list]] = {}
     bombs_by_hash: dict[str, dict[str, list]] = {}
     obstacles_by_hash: dict[str, dict[str, list]] = {}
+    arcs_by_hash: dict[str, dict[str, list]] = {}
     metadata_by_hash: dict[str, dict] = {}
 
     for bm in beatmaps:
@@ -217,6 +243,31 @@ def write_parquet(
             ocols["width"].append(obs.width)
             ocols["height"].append(obs.height)
 
+        # --- Arcs ---
+        if song_hash not in arcs_by_hash:
+            arcs_by_hash[song_hash] = {k: [] for k in ARCS_SCHEMA.names}
+        acols = arcs_by_hash[song_hash]
+        for arc in bm.arcs:
+            acols["song_hash"].append(song_hash)
+            acols["source"].append(source)
+            acols["difficulty"].append(difficulty)
+            acols["characteristic"].append(characteristic)
+            acols["bpm"].append(bpm)
+            acols["beat"].append(arc.beat)
+            acols["time_seconds"].append(arc.time_seconds)
+            acols["x"].append(arc.x)
+            acols["y"].append(arc.y)
+            acols["color"].append(arc.color)
+            acols["cut_direction"].append(arc.cut_direction)
+            acols["head_multiplier"].append(arc.head_multiplier)
+            acols["tail_beat"].append(arc.tail_beat)
+            acols["tail_time_seconds"].append(arc.tail_time_seconds)
+            acols["tail_x"].append(arc.tail_x)
+            acols["tail_y"].append(arc.tail_y)
+            acols["tail_cut_direction"].append(arc.tail_cut_direction)
+            acols["tail_multiplier"].append(arc.tail_multiplier)
+            acols["mid_anchor_mode"].append(arc.mid_anchor_mode)
+
         # --- Metadata (deduplicated by hash) ---
         if song_hash not in metadata_by_hash:
             metadata_by_hash[song_hash] = {
@@ -253,6 +304,9 @@ def write_parquet(
     for ocols in obstacles_by_hash.values():
         for k in ("x", "y", "width", "height"):
             ocols[k] = _clamp8(ocols[k])
+    for acols in arcs_by_hash.values():
+        for k in ("x", "y", "color", "cut_direction", "tail_x", "tail_y", "tail_cut_direction", "mid_anchor_mode"):
+            acols[k] = _clamp8(acols[k])
 
     # Convert accumulated columns to Arrow tables (one per song_hash)
     notes_tables = {
@@ -267,6 +321,10 @@ def write_parquet(
         h: pa.table(cols, schema=OBSTACLES_SCHEMA)
         for h, cols in obstacles_by_hash.items()
     }
+    arcs_tables = {
+        h: pa.table(cols, schema=ARCS_SCHEMA)
+        for h, cols in arcs_by_hash.items()
+    }
 
     # Write chunked Parquet files (one row group per song, split at max_file_bytes)
     notes_files = _write_tables_chunked(
@@ -278,10 +336,13 @@ def write_parquet(
     obstacles_files = _write_tables_chunked(
         obstacles_tables, output_dir, "obstacles", OBSTACLES_SCHEMA, max_file_bytes,
     )
+    arcs_files = _write_tables_chunked(
+        arcs_tables, output_dir, "arcs", ARCS_SCHEMA, max_file_bytes,
+    )
 
     logger.info(
-        "Wrote %d notes files, %d bombs files, %d obstacles files to %s",
-        len(notes_files), len(bombs_files), len(obstacles_files), output_dir,
+        "Wrote %d notes files, %d bombs files, %d obstacles files, %d arcs files to %s",
+        len(notes_files), len(bombs_files), len(obstacles_files), len(arcs_files), output_dir,
     )
 
     # --- Write metadata JSON ---
@@ -315,6 +376,15 @@ def read_obstacles_parquet(path: Path) -> pa.Table:
     ``obstacles_*.parquet`` files.
     """
     return _read_parquet_glob(path, "obstacles")
+
+
+def read_arcs_parquet(path: Path) -> pa.Table:
+    """Read arcs Parquet file(s) and return a single Arrow table.
+
+    Accepts either a single ``.parquet`` file or a directory containing
+    ``arcs_*.parquet`` files.
+    """
+    return _read_parquet_glob(path, "arcs")
 
 
 def _read_parquet_glob(path: Path, prefix: str) -> pa.Table:
