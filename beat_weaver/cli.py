@@ -164,6 +164,7 @@ _AUDIO_EXTENSIONS = {".wav", ".ogg", ".egg", ".mp3", ".flac", ".m4a"}
 
 
 def _generate_one(model, config, device, args, audio_path: Path, output: Path) -> None:
+    import torch
     from beat_weaver.model.audio import (
         beat_align_spectrogram, compute_mel_spectrogram, compute_mel_with_onset,
         detect_bpm, load_audio,
