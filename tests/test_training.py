@@ -4,8 +4,36 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from beat_weaver.model.training import _color_balance_loss
+from beat_weaver.model.config import ModelConfig
+from beat_weaver.model.training import Trainer, _color_balance_loss
 from beat_weaver.model.tokenizer import LEFT_BASE, LEFT_COUNT, RIGHT_BASE, RIGHT_COUNT
+from beat_weaver.model.transformer import BeatWeaverModel
+
+
+class TestTrainerWeightDecay:
+    def test_config_weight_decay_reaches_optimizer(self, tmp_path):
+        """A non-default weight_decay in config must actually reach AdamW —
+        small-dataset training relies on this being tunable per-config."""
+        config = ModelConfig(
+            vocab_size=32, max_seq_len=16, n_mels=8, max_audio_len=16,
+            encoder_layers=1, encoder_dim=8, encoder_heads=2, encoder_ff_dim=16,
+            decoder_layers=1, decoder_dim=8, decoder_heads=2, decoder_ff_dim=16,
+            weight_decay=0.05,
+        )
+        model = BeatWeaverModel(config)
+        trainer = Trainer(model, config, tmp_path, device=torch.device("cpu"))
+        assert trainer.optimizer.param_groups[0]["weight_decay"] == 0.05
+
+    def test_default_weight_decay_unchanged(self, tmp_path):
+        """Default weight_decay must match the previous hardcoded value (0.01)."""
+        config = ModelConfig(
+            vocab_size=32, max_seq_len=16, n_mels=8, max_audio_len=16,
+            encoder_layers=1, encoder_dim=8, encoder_heads=2, encoder_ff_dim=16,
+            decoder_layers=1, decoder_dim=8, decoder_heads=2, decoder_ff_dim=16,
+        )
+        model = BeatWeaverModel(config)
+        trainer = Trainer(model, config, tmp_path, device=torch.device("cpu"))
+        assert trainer.optimizer.param_groups[0]["weight_decay"] == 0.01
 
 
 class TestColorBalanceLoss:

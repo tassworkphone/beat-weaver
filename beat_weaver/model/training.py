@@ -84,7 +84,7 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=config.learning_rate,
-            weight_decay=0.01,
+            weight_decay=config.weight_decay,
         )
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=PAD,

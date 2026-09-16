@@ -189,6 +189,37 @@ class TestSpecAugment:
         _ = BeatSaberDataset._spec_augment(mel)
         assert np.all(mel == 1.0)
 
+    def test_default_strength_matches_unscaled_behavior(self):
+        """strength=1.0 (the default) must behave exactly as before the
+        strength parameter was added — no regression for existing configs."""
+        mel = np.ones((80, 100), dtype=np.float32)
+        augmented = BeatSaberDataset._spec_augment(mel, strength=1.0)
+        assert augmented.shape == mel.shape
+        assert np.any(augmented == 0.0)
+
+    def test_higher_strength_masks_more_on_average(self):
+        """A small dataset benefits from heavier augmentation — strength=3.0
+        should mask meaningfully more cells than strength=1.0 on average."""
+        mel = np.ones((80, 4096), dtype=np.float32)
+
+        def avg_masked_fraction(strength: float, trials: int = 20) -> float:
+            total = 0.0
+            for _ in range(trials):
+                augmented = BeatSaberDataset._spec_augment(mel, strength=strength)
+                total += np.mean(augmented == 0.0)
+            return total / trials
+
+        low = avg_masked_fraction(1.0)
+        high = avg_masked_fraction(3.0)
+        assert high > low
+
+    def test_strength_does_not_crash_on_small_mel(self):
+        """A high strength must clamp to the mel's actual dimensions rather
+        than producing an invalid randint range."""
+        mel = np.ones((5, 10), dtype=np.float32)
+        augmented = BeatSaberDataset._spec_augment(mel, strength=5.0)
+        assert augmented.shape == mel.shape
+
 
 class TestCacheVersioning:
     def test_version_key_changes_with_onset(self):

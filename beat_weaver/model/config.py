@@ -44,6 +44,7 @@ class ModelConfig:
     gradient_clip_norm: float = 1.0
     gradient_accumulation_steps: int = 4  # Effective batch = batch_size * this
     early_stopping_patience: int = 10
+    weight_decay: float = 0.01  # AdamW weight decay
 
     # Data weighting
     official_ratio: float = 0.2  # Target fraction of each batch from official maps
@@ -70,6 +71,9 @@ class ModelConfig:
 
     # Bombs
     include_bombs: bool = False  # Emit a BOMB token slot per position (bumps vocab_size)
+
+    # Data augmentation
+    spec_augment_strength: float = 1.0  # Multiplier on SpecAugment mask count/width
 
     def save(self, path: Path) -> None:
         """Save config to JSON file."""

@@ -456,7 +456,7 @@ class BeatSaberDataset(Dataset):
 
         # SpecAugment: random time/frequency masking (training only)
         if self.split == "train":
-            mel = self._spec_augment(mel)
+            mel = self._spec_augment(mel, strength=self.config.spec_augment_strength)
 
         return (
             torch.from_numpy(mel),                          # (n_mels, T_audio)
@@ -465,25 +465,34 @@ class BeatSaberDataset(Dataset):
         )
 
     @staticmethod
-    def _spec_augment(mel: np.ndarray) -> np.ndarray:
+    def _spec_augment(mel: np.ndarray, strength: float = 1.0) -> np.ndarray:
         """Apply SpecAugment: random time and frequency masking.
 
         Time mask width scales with sequence length so the masking fraction
         stays meaningful for long sequences (e.g. 4096 frames).
+
+        strength scales both the number of masks and their max width —
+        small datasets benefit from heavier augmentation (see small-dataset
+        training notes: "augment like the dataset is small") without
+        affecting the default behavior (strength=1.0) used elsewhere.
         """
         mel = mel.copy()  # Don't mutate cached data
         n_mels, n_frames = mel.shape
         if n_frames == 0:
             return mel
-        # Frequency masking: 2 bands, width up to 10 bins
-        for _ in range(2):
-            f = np.random.randint(1, min(11, n_mels))
+        n_masks = max(1, round(2 * strength))
+        # Frequency masking: width up to 10 bins (scaled), capped to the mel axis
+        max_f = max(1, min(n_mels - 1, round(10 * strength)))
+        for _ in range(n_masks):
+            f = np.random.randint(1, max_f + 1)
             f0 = np.random.randint(0, n_mels - f + 1)
             mel[f0:f0 + f, :] = 0.0
-        # Time masking: scale width with sequence length (~2% of frames, min 20, max 100)
+        # Time masking: scale width with sequence length (~2% of frames, min 20, max 100),
+        # then apply the same strength scaling, capped to the sequence length.
         max_t = max(20, min(100, n_frames // 50))
-        for _ in range(2):
-            t = np.random.randint(1, min(max_t + 1, n_frames))
+        max_t = max(1, min(n_frames, round(max_t * strength)))
+        for _ in range(n_masks):
+            t = np.random.randint(1, max_t + 1)
             t0 = np.random.randint(0, n_frames - t + 1)
             mel[:, t0:t0 + t] = 0.0
         return mel
