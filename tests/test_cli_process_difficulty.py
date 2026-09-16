@@ -5,7 +5,9 @@ the Parquet output, rather than relying only on a training-time filter
 (ModelConfig.min_difficulty/max_difficulty) — the user wanted maps they
 never intend to train on excluded from data/processed entirely.
 """
-from beat_weaver.cli import _filter_by_difficulty
+from pathlib import Path
+
+from beat_weaver.cli import _detect_source, _filter_by_difficulty
 from beat_weaver.schemas.normalized import DifficultyInfo, NormalizedBeatmap, SongMetadata
 
 
@@ -48,3 +50,38 @@ class TestFilterByDifficulty:
         kept, excluded = _filter_by_difficulty(beatmaps, {"Normal"})
         assert kept == []
         assert excluded == 2
+
+
+class TestDetectSource:
+    """Regression coverage for combining multiple --input directories:
+    source detection must work from the full path, not just components
+    relative to a single root, so a differently-named folder holding
+    copied official maps (e.g. "official_normal_only") still tags correctly.
+    """
+
+    def test_official_in_default_layout(self, tmp_path):
+        folder = tmp_path / "data" / "raw" / "official" / "somesong"
+        folder.mkdir(parents=True)
+        assert _detect_source(folder, tmp_path / "data" / "raw") == "official"
+
+    def test_beatsaver_in_default_layout(self, tmp_path):
+        folder = tmp_path / "data" / "raw" / "beatsaver" / "somehash"
+        folder.mkdir(parents=True)
+        assert _detect_source(folder, tmp_path / "data" / "raw") == "beatsaver"
+
+    def test_renamed_official_folder_still_detected(self, tmp_path):
+        """A trimmed copy under a differently-named folder (as long as
+        "official" still appears in the path) must still tag as official."""
+        folder = tmp_path / "data" / "raw" / "official_normal_only" / "somesong"
+        folder.mkdir(parents=True)
+        assert _detect_source(folder, folder.parent) == "official"
+
+    def test_custom_named_beatsaver_folder_detected(self, tmp_path):
+        folder = tmp_path / "data" / "raw" / "beatsaver_normal90" / "somehash"
+        folder.mkdir(parents=True)
+        assert _detect_source(folder, folder.parent) == "beatsaver"
+
+    def test_unrelated_folder_is_local_custom(self, tmp_path):
+        folder = tmp_path / "data" / "raw" / "my_own_maps" / "somesong"
+        folder.mkdir(parents=True)
+        assert _detect_source(folder, folder.parent) == "local_custom"

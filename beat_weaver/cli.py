@@ -53,15 +53,18 @@ def cmd_build_manifest(args: argparse.Namespace) -> None:
 
 
 def _detect_source(map_folder: Path, input_root: Path) -> str:
-    """Detect map source from its path relative to the input root."""
-    try:
-        rel = map_folder.relative_to(input_root)
-        parts = [p.lower() for p in rel.parts]
-    except ValueError:
-        parts = []
-    if "official" in parts:
+    """Detect map source from its full path.
+
+    Checks the full resolved path (not just components relative to
+    input_root) so this still works when multiple --input directories are
+    combined and/or a source has been copied into a differently-named
+    folder (e.g. a trimmed "official_normal_only" build) — as long as
+    "official" or "beatsaver" appears anywhere in the path.
+    """
+    full_path = str(map_folder.resolve()).lower()
+    if "official" in full_path:
         return "official"
-    if "beatsaver" in parts:
+    if "beatsaver" in full_path:
         return "beatsaver"
     return "local_custom"
 
@@ -110,15 +113,22 @@ def cmd_process(args: argparse.Namespace) -> None:
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from beat_weaver.storage.writer import write_parquet
 
-    input_dir = Path(args.input)
+    input_dirs = [Path(p) for p in args.input] if isinstance(args.input, list) else [Path(args.input)]
     output_dir = Path(args.output)
 
-    # Collect all map folders up front
+    # Collect all map folders up front, de-duplicating in case input
+    # directories overlap (e.g. one nested inside another).
     folders = []
-    for info_file in sorted(input_dir.rglob("Info.dat")):
-        map_folder = info_file.parent
-        source = _detect_source(map_folder, input_dir)
-        folders.append((map_folder, source))
+    seen_folders = set()
+    for input_dir in input_dirs:
+        for info_file in sorted(input_dir.rglob("Info.dat")):
+            map_folder = info_file.parent
+            resolved = map_folder.resolve()
+            if resolved in seen_folders:
+                continue
+            seen_folders.add(resolved)
+            source = _detect_source(map_folder, input_dir)
+            folders.append((map_folder, source))
 
     wanted_difficulties = set(args.difficulty) if getattr(args, "difficulty", None) else None
 
@@ -442,7 +452,8 @@ def main() -> None:
 
     # process
     proc = sub.add_parser("process", help="Normalize raw maps into Parquet")
-    proc.add_argument("--input", default="data/raw")
+    proc.add_argument("--input", nargs="+", default=["data/raw"],
+                     help="Raw map directories to scan (default: data/raw)")
     proc.add_argument("--output", default="data/processed")
     proc.add_argument("--difficulty", nargs="+", default=None,
                      choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
