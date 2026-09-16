@@ -7,7 +7,7 @@ import pytest
 np = pytest.importorskip("numpy")
 sf = pytest.importorskip("soundfile")
 
-from beat_weaver.model.exporter import export_map, export_notes
+from beat_weaver.model.exporter import export_map, export_multi_difficulty, export_notes
 from beat_weaver.model.tokenizer import (
     BAR,
     DIFF_EXPERT,
@@ -290,3 +290,75 @@ class TestExportObstacles:
                               audio_path=audio_file, output_dir=output)
         dat = json.loads((result / "Expert.dat").read_text())
         assert dat["_obstacles"] == []
+
+
+class TestExportMultiDifficulty:
+    def test_writes_one_dat_per_difficulty(self, tmp_path, audio_file):
+        maps = {
+            "Normal": ([Note(beat=0.0, time_seconds=0.0, x=0, y=0, color=0, cut_direction=1)], []),
+            "Expert": ([Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=1, cut_direction=0)], []),
+            "ExpertPlus": ([Note(beat=0.0, time_seconds=0.0, x=2, y=0, color=0, cut_direction=0)], []),
+        }
+        output = tmp_path / "multi_map"
+        result = export_multi_difficulty(maps, bpm=120.0, song_name="Multi Test",
+                                         audio_path=audio_file, output_dir=output)
+
+        assert (result / "song.ogg").exists()
+        for difficulty in maps:
+            assert (result / f"{difficulty}.dat").exists()
+        # Only one Info.dat / one audio file shared across all difficulties
+        assert len(list(result.glob("*.ogg"))) == 1
+        assert len(list(result.glob("Info.dat"))) == 1
+
+    def test_info_dat_lists_all_difficulties_in_standard_order(self, tmp_path, audio_file):
+        """Difficulties should be listed in standard order regardless of dict insertion order."""
+        maps = {
+            "ExpertPlus": ([], []),
+            "Easy": ([], []),
+            "Hard": ([], []),
+        }
+        output = tmp_path / "multi_order_map"
+        result = export_multi_difficulty(maps, bpm=128.0, song_name="Order Test",
+                                         audio_path=audio_file, output_dir=output)
+
+        info = json.loads((result / "Info.dat").read_text())
+        beatmaps = info["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"]
+        names = [b["_difficulty"] for b in beatmaps]
+        assert names == ["Easy", "Hard", "ExpertPlus"]
+        assert {b["_beatmapFilename"] for b in beatmaps} == {"Easy.dat", "Hard.dat", "ExpertPlus.dat"}
+
+    def test_each_difficulty_dat_has_correct_notes(self, tmp_path, audio_file):
+        maps = {
+            "Easy": ([Note(beat=1.0, time_seconds=0.5, x=0, y=0, color=0, cut_direction=1)], []),
+            "Expert": (
+                [
+                    Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1),
+                    Note(beat=0.5, time_seconds=0.25, x=2, y=0, color=1, cut_direction=0),
+                ],
+                [],
+            ),
+        }
+        output = tmp_path / "multi_notes_map"
+        result = export_multi_difficulty(maps, bpm=120.0, song_name="Notes Test",
+                                         audio_path=audio_file, output_dir=output)
+
+        easy_dat = json.loads((result / "Easy.dat").read_text())
+        expert_dat = json.loads((result / "Expert.dat").read_text())
+        assert len(easy_dat["_notes"]) == 1
+        assert len(expert_dat["_notes"]) == 2
+
+    def test_requires_at_least_one_difficulty(self, tmp_path, audio_file):
+        with pytest.raises(ValueError):
+            export_multi_difficulty({}, bpm=120.0, song_name="Empty",
+                                    audio_path=audio_file, output_dir=tmp_path / "empty_map")
+
+    def test_njs_matches_each_difficulty(self, tmp_path, audio_file):
+        maps = {"Easy": ([], []), "ExpertPlus": ([], [])}
+        output = tmp_path / "njs_map"
+        result = export_multi_difficulty(maps, bpm=120.0, song_name="NJS Test",
+                                         audio_path=audio_file, output_dir=output)
+
+        info = json.loads((result / "Info.dat").read_text())
+        beatmaps = {b["_difficulty"]: b for b in info["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"]}
+        assert beatmaps["Easy"]["_noteJumpMovementSpeed"] == 10
+        assert beatmaps["ExpertPlus"]["_noteJumpMovementSpeed"] == 18

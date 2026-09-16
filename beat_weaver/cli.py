@@ -166,7 +166,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         detect_bpm, load_audio,
     )
     from beat_weaver.model.config import ModelConfig
-    from beat_weaver.model.exporter import export_notes
+    from beat_weaver.model.exporter import export_multi_difficulty
     from beat_weaver.model.inference import generate_full_song
     from beat_weaver.model.obstacles import generate_obstacles, load_obstacle_stats
     from beat_weaver.model.transformer import BeatWeaverModel
@@ -200,30 +200,36 @@ def cmd_generate(args: argparse.Namespace) -> None:
     mel = beat_align_spectrogram(mel, sr=sr, hop_length=config.hop_length, bpm=bpm)
     mel_tensor = torch.from_numpy(mel)
 
-    all_events = generate_full_song(
-        model, mel_tensor, args.difficulty, config, bpm,
-        temperature=args.temperature,
-        seed=args.seed,
-    )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
-    # decode_tokens (called inside generate_full_song) represents bombs as
-    # color=3 Note entries — split them back out before obstacle placement/export.
-    notes = [n for n in all_events if n.color in (0, 1)]
-    bombs = [n for n in all_events if n.color == 3]
+    obstacle_stats = load_obstacle_stats(Path(args.obstacle_stats)) if args.obstacle_stats else None
 
-    obstacles = []
-    if not args.no_obstacles:
-        stats = load_obstacle_stats(Path(args.obstacle_stats)) if args.obstacle_stats else None
-        obstacles = generate_obstacles(notes, bombs, bpm, args.difficulty, stats=stats)
+    maps = {}
+    summary = []
+    for difficulty in args.difficulty:
+        all_events = generate_full_song(
+            model, mel_tensor, difficulty, config, bpm,
+            temperature=args.temperature,
+            seed=args.seed,
+        )
+        # decode_tokens (called inside generate_full_song) represents bombs as
+        # color=3 Note entries — split them back out before obstacle placement/export.
+        notes = [n for n in all_events if n.color in (0, 1)]
+        bombs = [n for n in all_events if n.color == 3]
+
+        obstacles = []
+        if not args.no_obstacles:
+            obstacles = generate_obstacles(notes, bombs, bpm, difficulty, stats=obstacle_stats)
+
+        maps[difficulty] = (notes + bombs, obstacles)
+        summary.append(f"{difficulty}: {len(notes)} notes, {len(bombs)} bombs, {len(obstacles)} obstacles")
 
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")
-    export_notes(notes + bombs, bpm, song_name, Path(args.audio), output, args.difficulty, obstacles=obstacles)
-    print(
-        f"Generated map: {output} ({n_windows} window(s), {len(notes)} notes, "
-        f"{len(bombs)} bombs, {len(obstacles)} obstacles)"
-    )
+    export_multi_difficulty(maps, bpm, song_name, Path(args.audio), output)
+    print(f"Generated map: {output} ({n_windows} window(s) per difficulty)")
+    for line in summary:
+        print(f"  {line}")
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
@@ -388,8 +394,9 @@ def main() -> None:
     gen = sub.add_parser("generate", help="Generate a Beat Saber map from audio")
     gen.add_argument("--checkpoint", required=True, help="Model checkpoint directory")
     gen.add_argument("--audio", required=True, help="Input audio file")
-    gen.add_argument("--difficulty", default="Expert",
-                     choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"])
+    gen.add_argument("--difficulty", nargs="+", default=["Expert"],
+                     choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
+                     help="One or more difficulties to generate into the same map folder")
     gen.add_argument("--output", default=None, help="Output map folder")
     gen.add_argument("--bpm", type=float, default=None,
                      help="Song BPM (auto-detected from audio if not provided)")

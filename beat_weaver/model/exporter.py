@@ -70,15 +70,33 @@ _DIFFICULTY_RANK = {
 }
 
 
+_DIFFICULTY_ORDER = ["Easy", "Normal", "Hard", "Expert", "ExpertPlus"]
+
+
 def _build_info_dat(
     song_name: str,
     bpm: float,
-    difficulty: str,
+    difficulties: list[str],
     audio_filename: str = "song.ogg",
 ) -> dict:
-    """Build a v2 Info.dat structure."""
-    njs = _NJS_TABLE.get(difficulty, 16)
-    rank = _DIFFICULTY_RANK.get(difficulty, 7)
+    """Build a v2 Info.dat structure listing one or more difficulties.
+
+    All difficulties share one `_difficultyBeatmapSets` entry (Standard
+    characteristic) — matches how a single `beat-weaver generate` call with
+    multiple `--difficulty` values produces one map folder playable at any
+    of the selected levels.
+    """
+    ordered = sorted(difficulties, key=lambda d: _DIFFICULTY_ORDER.index(d) if d in _DIFFICULTY_ORDER else 99)
+    beatmaps = [
+        {
+            "_difficulty": difficulty,
+            "_difficultyRank": _DIFFICULTY_RANK.get(difficulty, 7),
+            "_beatmapFilename": f"{difficulty}.dat",
+            "_noteJumpMovementSpeed": _NJS_TABLE.get(difficulty, 16),
+            "_noteJumpStartBeatOffset": 0,
+        }
+        for difficulty in ordered
+    ]
 
     return {
         "_version": "2.0.0",
@@ -98,15 +116,7 @@ def _build_info_dat(
         "_difficultyBeatmapSets": [
             {
                 "_beatmapCharacteristicName": "Standard",
-                "_difficultyBeatmaps": [
-                    {
-                        "_difficulty": difficulty,
-                        "_difficultyRank": rank,
-                        "_beatmapFilename": f"{difficulty}.dat",
-                        "_noteJumpMovementSpeed": njs,
-                        "_noteJumpStartBeatOffset": 0,
-                    }
-                ],
+                "_difficultyBeatmaps": beatmaps,
             }
         ],
     }
@@ -187,7 +197,7 @@ def export_map(
     audio_filename = _write_song_audio(audio_path, output_dir)
 
     # Write Info.dat
-    info = _build_info_dat(song_name, bpm, difficulty, audio_filename)
+    info = _build_info_dat(song_name, bpm, [difficulty], audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
 
     # Write difficulty file
@@ -228,10 +238,53 @@ def export_notes(
 
     audio_filename = _write_song_audio(audio_path, output_dir)
 
-    info = _build_info_dat(song_name, bpm, difficulty, audio_filename)
+    info = _build_info_dat(song_name, bpm, [difficulty], audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
 
     diff_dat = _build_difficulty_dat(notes, obstacles)
     (output_dir / f"{difficulty}.dat").write_text(json.dumps(diff_dat, indent=2), encoding="utf-8")
+
+    return output_dir
+
+
+def export_multi_difficulty(
+    maps: dict[str, tuple[list[Note], list[Obstacle] | None]],
+    bpm: float,
+    song_name: str,
+    audio_path: Path,
+    output_dir: Path,
+) -> Path:
+    """Export notes for one or more difficulties into a single map folder.
+
+    Unlike export_notes() (one difficulty per call, and per output folder if
+    you want multiple), this writes one shared Info.dat listing every
+    difficulty plus one `<Difficulty>.dat` per entry — the way a real Beat
+    Saber map normally ships multiple difficulties together.
+
+    Args:
+        maps: {difficulty: (notes, obstacles)} — notes as from decode_tokens
+            (bomb entries are color=3); obstacles may be None.
+        bpm: Song BPM.
+        song_name: Display name for the song.
+        audio_path: Path to the audio file.
+        output_dir: Where to create the map folder.
+
+    Returns:
+        Path to the created map folder.
+    """
+    if not maps:
+        raise ValueError("export_multi_difficulty requires at least one difficulty")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    audio_filename = _write_song_audio(audio_path, output_dir)
+
+    info = _build_info_dat(song_name, bpm, list(maps.keys()), audio_filename)
+    (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
+
+    for difficulty, (notes, obstacles) in maps.items():
+        diff_dat = _build_difficulty_dat(notes, obstacles)
+        (output_dir / f"{difficulty}.dat").write_text(json.dumps(diff_dat, indent=2), encoding="utf-8")
 
     return output_dir

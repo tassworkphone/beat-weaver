@@ -95,7 +95,13 @@ def tab_generate() -> None:
     audio_file = st.file_uploader(
         "Audio file", type=["wav", "ogg", "mp3", "flac", "m4a"], key="gen_audio"
     )
-    difficulty = st.selectbox("Difficulty", DIFFICULTIES, index=3, key="gen_diff")
+    st.caption("Difficulties (check one or more — all share one map folder)")
+    diff_cols = st.columns(len(DIFFICULTIES))
+    selected_difficulties = []
+    for col, diff_name in zip(diff_cols, DIFFICULTIES):
+        with col:
+            if st.checkbox(diff_name, value=(diff_name == "Expert"), key=f"gen_diff_{diff_name}"):
+                selected_difficulties.append(diff_name)
     auto_bpm = st.checkbox("Auto-detect BPM", value=True, key="gen_auto_bpm")
     bpm = None
     if not auto_bpm:
@@ -112,7 +118,7 @@ def tab_generate() -> None:
         "data/processed/obstacle_stats.json", key="gen_obstacle_stats",
     )
 
-    args = ["generate", "--checkpoint", checkpoint, "--difficulty", difficulty,
+    args = ["generate", "--checkpoint", checkpoint, "--difficulty", *selected_difficulties,
             "--temperature", str(temperature)]
     if bpm is not None:
         args += ["--bpm", str(bpm)]
@@ -125,8 +131,10 @@ def tab_generate() -> None:
     elif obstacle_stats:
         args += ["--obstacle-stats", obstacle_stats]
     show_command_preview([*args, "--audio", audio_file.name if audio_file else "<audio file>"])
+    if not selected_difficulties:
+        st.caption(":red[Check at least one difficulty]")
 
-    can_run = audio_file is not None and not job_running("generate")
+    can_run = audio_file is not None and bool(selected_difficulties) and not job_running("generate")
     if st.button("Generate", key="gen_start", disabled=not can_run):
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         audio_path = UPLOAD_DIR / audio_file.name
