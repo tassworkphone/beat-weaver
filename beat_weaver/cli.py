@@ -94,6 +94,18 @@ def _process_single_folder(
     return beatmaps
 
 
+def _filter_by_difficulty(beatmaps: list, wanted: set[str] | None) -> tuple[list, int]:
+    """Keep only beatmaps whose difficulty is in *wanted*.
+
+    Returns (kept, num_excluded). wanted=None means no filtering — every
+    beatmap is kept, matching the pre-filter default behavior exactly.
+    """
+    if wanted is None:
+        return beatmaps, 0
+    kept = [bm for bm in beatmaps if bm.difficulty_info.difficulty in wanted]
+    return kept, len(beatmaps) - len(kept)
+
+
 def cmd_process(args: argparse.Namespace) -> None:
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from beat_weaver.storage.writer import write_parquet
@@ -108,7 +120,10 @@ def cmd_process(args: argparse.Namespace) -> None:
         source = _detect_source(map_folder, input_dir)
         folders.append((map_folder, source))
 
+    wanted_difficulties = set(args.difficulty) if getattr(args, "difficulty", None) else None
+
     all_beatmaps = []
+    skipped_difficulty = 0
     with ProcessPoolExecutor() as executor:
         futures = {
             executor.submit(_process_single_folder, folder, source): folder
@@ -116,14 +131,22 @@ def cmd_process(args: argparse.Namespace) -> None:
         }
         for future in as_completed(futures):
             try:
-                all_beatmaps.extend(future.result())
+                result, excluded = _filter_by_difficulty(future.result(), wanted_difficulties)
+                skipped_difficulty += excluded
+                all_beatmaps.extend(result)
             except Exception:
                 logging.getLogger(__name__).warning(
                     "Failed to process %s", futures[future], exc_info=True,
                 )
 
     write_parquet(all_beatmaps, output_dir)
-    print(f"Processed {len(all_beatmaps)} beatmaps to {output_dir}")
+    if wanted_difficulties is not None:
+        print(
+            f"Processed {len(all_beatmaps)} beatmaps to {output_dir} "
+            f"(excluded {skipped_difficulty} non-{'/'.join(sorted(wanted_difficulties))} difficulties)"
+        )
+    else:
+        print(f"Processed {len(all_beatmaps)} beatmaps to {output_dir}")
 
 
 def cmd_train(args: argparse.Namespace) -> None:
@@ -421,6 +444,11 @@ def main() -> None:
     proc = sub.add_parser("process", help="Normalize raw maps into Parquet")
     proc.add_argument("--input", default="data/raw")
     proc.add_argument("--output", default="data/processed")
+    proc.add_argument("--difficulty", nargs="+", default=None,
+                     choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
+                     help="Only write these difficulties to Parquet, excluding all "
+                          "others from the processed data entirely (default: no "
+                          "filter, every difficulty in each map is included)")
 
     # run (full pipeline)
     run = sub.add_parser("run", help="Run full pipeline")

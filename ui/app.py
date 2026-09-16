@@ -323,7 +323,17 @@ def tab_process() -> None:
     input_dir = st.text_input("Raw maps directory", "data/raw", key="pr_input")
     output_dir = st.text_input("Output directory", "data/processed", key="pr_output")
 
+    st.caption("Difficulties to keep (check one or more — blank = no filter, every difficulty is written to Parquet)")
+    diff_cols = st.columns(len(DIFFICULTIES))
+    selected_difficulties = []
+    for col, diff_name in zip(diff_cols, DIFFICULTIES):
+        with col:
+            if st.checkbox(diff_name, value=False, key=f"pr_diff_{diff_name}"):
+                selected_difficulties.append(diff_name)
+
     args = ["process", "--input", input_dir, "--output", output_dir]
+    if selected_difficulties:
+        args += ["--difficulty", *selected_difficulties]
     show_command_preview(args)
 
     if st.button("Start processing", key="pr_start", disabled=job_running("process")):
