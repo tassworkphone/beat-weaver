@@ -266,8 +266,18 @@ def tab_download() -> None:
     workers = st.number_input("Parallel workers", 1, value=8, key="dl_workers")
     output = st.text_input("Output directory", "data/raw/beatsaver", key="dl_output")
 
+    st.caption("Difficulties (check one or more — blank = no filter, any difficulty)")
+    diff_cols = st.columns(len(DIFFICULTIES))
+    selected_difficulties = []
+    for col, diff_name in zip(diff_cols, DIFFICULTIES):
+        with col:
+            if st.checkbox(diff_name, value=False, key=f"dl_diff_{diff_name}"):
+                selected_difficulties.append(diff_name)
+
     args = ["download", "--min-score", str(min_score), "--min-upvotes", str(int(min_upvotes)),
             "--max-maps", str(int(max_maps)), "--workers", str(int(workers)), "--output", output]
+    if selected_difficulties:
+        args += ["--difficulty", *selected_difficulties]
     show_command_preview(args)
 
     if st.button("Start download", key="dl_start", disabled=job_running("download")):

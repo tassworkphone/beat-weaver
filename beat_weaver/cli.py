@@ -20,6 +20,7 @@ def cmd_download(args: argparse.Namespace) -> None:
         min_upvotes=args.min_upvotes,
         max_maps=args.max_maps,
         workers=args.workers,
+        difficulties=args.difficulty,
     )
     newly = len(downloaded) - existing if len(downloaded) > existing else len(downloaded)
     limit = f" (limit: {args.max_maps})" if args.max_maps > 0 else " (no limit)"
@@ -395,6 +396,10 @@ def main() -> None:
                      help="Max maps to download (default: 0 = unlimited)")
     dl.add_argument("--workers", type=int, default=8,
                      help="Parallel download threads (default: 8)")
+    dl.add_argument("--difficulty", nargs="+", default=None,
+                     choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
+                     help="Only download maps offering at least one of these "
+                          "difficulties (default: no filter, any difficulty)")
     dl.add_argument("--output", default="data/raw/beatsaver")
 
     # extract-official

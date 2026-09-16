@@ -51,6 +51,11 @@ Download community maps from [BeatSaver](https://beatsaver.com/). This downloads
 ```bash
 # Download ~55K community maps (this takes several hours)
 beat-weaver download --min-score 0.75 --output data/raw/beatsaver
+
+# Or filter to maps offering specific difficulties (checked against each
+# map's own difficulty list — BeatSaver's search API has no server-side
+# difficulty filter, so this is applied client-side per page)
+beat-weaver download --min-score 0.75 --difficulty Easy Normal --output data/raw/beatsaver
 ```
 
 ### Step 2: Extract official maps (optional)

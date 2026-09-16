@@ -42,7 +42,7 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 
 | Command | Description |
 |---------|-------------|
-| `beat-weaver download` | Download custom maps from BeatSaver API |
+| `beat-weaver download` | Download custom maps from BeatSaver API (filterable by rating, upvotes, and now `--difficulty`, checked client-side against each map's own difficulty list) |
 | `beat-weaver extract-official` | Extract official maps from Unity bundles |
 | `beat-weaver build-manifest` | Build audio manifest from raw map folders |
 | `beat-weaver process` | Normalize raw maps to Parquet |

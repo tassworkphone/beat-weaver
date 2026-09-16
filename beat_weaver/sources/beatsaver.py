@@ -18,6 +18,15 @@ REQUEST_DELAY = 1.0  # seconds between API requests
 logger = logging.getLogger(__name__)
 
 
+def _has_any_difficulty(doc: dict, wanted: set[str]) -> bool:
+    """True if any version of this map offers one of the wanted difficulty levels."""
+    for version in doc.get("versions", []):
+        for diff in version.get("diffs", []):
+            if diff.get("difficulty") in wanted:
+                return True
+    return False
+
+
 class BeatSaverClient:
     def __init__(self):
         self.session = requests.Session()
@@ -29,15 +38,24 @@ class BeatSaverClient:
         min_upvotes: int = DEFAULT_MIN_UPVOTES,
         max_pages: int = 5000,
         automapper: bool = False,
+        difficulties: list[str] | None = None,
     ) -> Iterator[dict]:
         """Paginate through BeatSaver search results, yielding map docs.
 
         Default filters (score >= 0.75, upvotes >= 5, automapper=False)
         yield ~55,000 maps from ~115,000 total on BeatSaver. See
         RESEARCH.md "Training Data Quality Analysis" for rationale.
+
+        Args:
+            difficulties: If given, only yield maps that offer at least one
+                of these difficulty levels (e.g. ["Expert", "ExpertPlus"]).
+                Checked client-side against each map's own diffs list — the
+                BeatSaver search API has no server-side difficulty filter.
+                None (default) means no filtering, matching prior behavior.
         """
         total_found = 0
         page = 0
+        wanted_difficulties = set(difficulties) if difficulties else None
 
         while page < max_pages:
             response = self.session.get(
@@ -59,6 +77,10 @@ class BeatSaverClient:
                     below_threshold += 1
                     continue
                 if upvotes < min_upvotes:
+                    continue
+                if wanted_difficulties is not None and not _has_any_difficulty(
+                    doc, wanted_difficulties
+                ):
                     continue
                 total_found += 1
                 yield doc
@@ -131,6 +153,7 @@ class BeatSaverClient:
         min_upvotes: int = DEFAULT_MIN_UPVOTES,
         max_maps: int = 0,
         workers: int = 8,
+        difficulties: list[str] | None = None,
     ) -> list[Path]:
         """Search and download maps, returning list of extracted directories.
 
@@ -140,6 +163,8 @@ class BeatSaverClient:
             min_upvotes: Minimum number of upvotes.
             max_maps: Maximum maps to download. 0 means unlimited (all qualifying maps).
             workers: Number of parallel download threads (default 8).
+            difficulties: If given, only download maps offering at least one of
+                these difficulty levels (e.g. ["Easy", "Normal"]).
 
         API pagination is sequential (to respect rate limits), but zip
         file downloads run in parallel for throughput.  Already-downloaded
@@ -180,7 +205,7 @@ class BeatSaverClient:
 
         try:
             for map_info in self.search_maps(
-                min_score=min_score, min_upvotes=min_upvotes,
+                min_score=min_score, min_upvotes=min_upvotes, difficulties=difficulties,
             ):
                 map_hash = map_info["versions"][0]["hash"]
                 target_dir = dest_dir / map_hash
