@@ -149,6 +149,14 @@ beat-weaver generate \
   --bpm 128 \
   --seed 42 \
   --output my_map/
+
+# Or point at a folder of songs to generate them one at a time (a queue) —
+# each song gets its own subfolder under --output (default: output/<song>/)
+beat-weaver generate \
+  --checkpoint output/training/checkpoints/best \
+  --audio-dir songs/ \
+  --difficulty Expert \
+  --output my_maps/
 ```
 
 The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to play in-game.

@@ -159,30 +159,20 @@ def cmd_train(args: argparse.Namespace) -> None:
     print(f"Training complete. Best checkpoint: {best_ckpt}")
 
 
-def cmd_generate(args: argparse.Namespace) -> None:
-    import torch
+# Audio file extensions scanned when --audio-dir is given.
+_AUDIO_EXTENSIONS = {".wav", ".ogg", ".egg", ".mp3", ".flac", ".m4a"}
+
+
+def _generate_one(model, config, device, args, audio_path: Path, output: Path) -> None:
     from beat_weaver.model.audio import (
         beat_align_spectrogram, compute_mel_spectrogram, compute_mel_with_onset,
         detect_bpm, load_audio,
     )
-    from beat_weaver.model.config import ModelConfig
     from beat_weaver.model.exporter import export_multi_difficulty
     from beat_weaver.model.inference import generate_full_song
     from beat_weaver.model.obstacles import generate_obstacles, load_obstacle_stats
-    from beat_weaver.model.transformer import BeatWeaverModel
 
-    ckpt_dir = Path(args.checkpoint)
-    config = ModelConfig.load(ckpt_dir / "config.json")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = BeatWeaverModel(config)
-    model.load_state_dict(
-        torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
-    )
-    model.to(device)
-    model.eval()
-
-    audio, sr = load_audio(Path(args.audio), sr=config.sample_rate)
+    audio, sr = load_audio(audio_path, sr=config.sample_rate)
 
     bpm = args.bpm
     if bpm is None:
@@ -224,12 +214,58 @@ def cmd_generate(args: argparse.Namespace) -> None:
         maps[difficulty] = (notes + bombs, obstacles)
         summary.append(f"{difficulty}: {len(notes)} notes, {len(bombs)} bombs, {len(obstacles)} obstacles")
 
-    song_name = Path(args.audio).stem
-    output = Path(args.output) if args.output else Path(f"output/{song_name}")
-    export_multi_difficulty(maps, bpm, song_name, Path(args.audio), output)
+    song_name = audio_path.stem
+    export_multi_difficulty(maps, bpm, song_name, audio_path, output)
     print(f"Generated map: {output} ({n_windows} window(s) per difficulty)")
     for line in summary:
         print(f"  {line}")
+
+
+def cmd_generate(args: argparse.Namespace) -> None:
+    import torch
+    from beat_weaver.model.config import ModelConfig
+    from beat_weaver.model.transformer import BeatWeaverModel
+
+    ckpt_dir = Path(args.checkpoint)
+    config = ModelConfig.load(ckpt_dir / "config.json")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = BeatWeaverModel(config)
+    model.load_state_dict(
+        torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
+    )
+    model.to(device)
+    model.eval()
+
+    if args.audio_dir:
+        audio_dir = Path(args.audio_dir)
+        audio_paths = sorted(
+            p for p in audio_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in _AUDIO_EXTENSIONS
+        )
+        if not audio_paths:
+            print(f"No audio files found in {audio_dir}")
+            return
+        base_output = Path(args.output) if args.output else Path("output")
+        print(f"Queued {len(audio_paths)} song(s) from {audio_dir}")
+
+        failures = []
+        for i, audio_path in enumerate(audio_paths, start=1):
+            output = base_output / audio_path.stem
+            print(f"\n[{i}/{len(audio_paths)}] {audio_path.name}")
+            try:
+                _generate_one(model, config, device, args, audio_path, output)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Failed to generate map for %s", audio_path)
+                failures.append((audio_path.name, str(exc)))
+
+        print(f"\nDone: {len(audio_paths) - len(failures)}/{len(audio_paths)} succeeded")
+        for name, err in failures:
+            print(f"  FAILED {name}: {err}")
+    else:
+        song_name = Path(args.audio).stem
+        output = Path(args.output) if args.output else Path(f"output/{song_name}")
+        _generate_one(model, config, device, args, Path(args.audio), output)
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
@@ -408,11 +444,17 @@ def main() -> None:
     # generate
     gen = sub.add_parser("generate", help="Generate a Beat Saber map from audio")
     gen.add_argument("--checkpoint", required=True, help="Model checkpoint directory")
-    gen.add_argument("--audio", required=True, help="Input audio file")
+    audio_source = gen.add_mutually_exclusive_group(required=True)
+    audio_source.add_argument("--audio", default=None, help="Input audio file")
+    audio_source.add_argument("--audio-dir", default=None,
+                     help="Folder of audio files to generate one at a time (queue), "
+                          "each into its own subfolder under --output")
     gen.add_argument("--difficulty", nargs="+", default=["Expert"],
                      choices=["Easy", "Normal", "Hard", "Expert", "ExpertPlus"],
                      help="One or more difficulties to generate into the same map folder")
-    gen.add_argument("--output", default=None, help="Output map folder")
+    gen.add_argument("--output", default=None,
+                     help="Output map folder (--audio), or base directory for per-song "
+                          "subfolders (--audio-dir)")
     gen.add_argument("--bpm", type=float, default=None,
                      help="Song BPM (auto-detected from audio if not provided)")
     gen.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")

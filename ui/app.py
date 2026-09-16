@@ -92,9 +92,24 @@ def zip_directory(directory: Path) -> Path:
 def tab_generate() -> None:
     st.subheader("Generate a map from audio")
     checkpoint = st.text_input("Checkpoint directory", "output/training/checkpoints/best", key="gen_ckpt")
-    audio_file = st.file_uploader(
-        "Audio file", type=["wav", "ogg", "mp3", "flac", "m4a"], key="gen_audio"
+
+    source_mode = st.radio(
+        "Audio source", ["Single file", "Folder (queue)"], horizontal=True, key="gen_source_mode",
     )
+    audio_file = None
+    audio_dir = None
+    if source_mode == "Single file":
+        audio_file = st.file_uploader(
+            "Audio file", type=["wav", "ogg", "mp3", "flac", "m4a"], key="gen_audio"
+        )
+    else:
+        audio_dir = st.text_input(
+            "Folder of audio files (on disk — processed one at a time)",
+            "", key="gen_audio_dir",
+        )
+        if audio_dir and not Path(audio_dir).is_dir():
+            st.caption(":red[Folder not found]")
+
     st.caption("Difficulties (check one or more — all share one map folder)")
     diff_cols = st.columns(len(DIFFICULTIES))
     selected_difficulties = []
@@ -111,7 +126,12 @@ def tab_generate() -> None:
     seed = None
     if use_seed:
         seed = st.number_input("Seed", min_value=0, value=0, step=1, key="gen_seed")
-    output_dir = st.text_input("Output folder (blank = auto)", "", key="gen_output")
+    output_label = (
+        "Output base folder — one subfolder per song (blank = auto)"
+        if source_mode == "Folder (queue)"
+        else "Output folder (blank = auto)"
+    )
+    output_dir = st.text_input(output_label, "", key="gen_output")
     add_obstacles = st.checkbox("Add walls/obstacles (rule-based)", value=True, key="gen_add_obstacles")
     obstacle_stats = st.text_input(
         "Obstacle stats JSON (blank = built-in defaults)",
@@ -130,18 +150,31 @@ def tab_generate() -> None:
         args.append("--no-obstacles")
     elif obstacle_stats:
         args += ["--obstacle-stats", obstacle_stats]
-    show_command_preview([*args, "--audio", audio_file.name if audio_file else "<audio file>"])
+    if source_mode == "Folder (queue)":
+        show_command_preview([*args, "--audio-dir", audio_dir or "<folder>"])
+    else:
+        show_command_preview([*args, "--audio", audio_file.name if audio_file else "<audio file>"])
     if not selected_difficulties:
         st.caption(":red[Check at least one difficulty]")
 
-    can_run = audio_file is not None and bool(selected_difficulties) and not job_running("generate")
+    if source_mode == "Folder (queue)":
+        can_run = bool(audio_dir) and Path(audio_dir).is_dir() and bool(selected_difficulties) and not job_running("generate")
+    else:
+        can_run = audio_file is not None and bool(selected_difficulties) and not job_running("generate")
+
     if st.button("Generate", key="gen_start", disabled=not can_run):
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        audio_path = UPLOAD_DIR / audio_file.name
-        audio_path.write_bytes(audio_file.getvalue())
-        run_args = [*args, "--audio", str(audio_path)]
+        if source_mode == "Folder (queue)":
+            run_args = [*args, "--audio-dir", audio_dir]
+            st.session_state["gen_last_output"] = output_dir or "output"
+            st.session_state["gen_last_is_queue"] = True
+        else:
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            audio_path = UPLOAD_DIR / audio_file.name
+            audio_path.write_bytes(audio_file.getvalue())
+            run_args = [*args, "--audio", str(audio_path)]
+            st.session_state["gen_last_output"] = output_dir or f"output/{audio_path.stem}"
+            st.session_state["gen_last_is_queue"] = False
         start_job("generate", run_args)
-        st.session_state["gen_last_output"] = output_dir or f"output/{audio_path.stem}"
         st.rerun()
 
     render_log_panel("generate")
@@ -149,7 +182,9 @@ def tab_generate() -> None:
     status = job_status("generate")
     if status == "finished":
         out_dir = PROJECT_ROOT / st.session_state.get("gen_last_output", "")
-        if out_dir.exists():
+        if st.session_state.get("gen_last_is_queue"):
+            st.caption(f"Generated maps are in `{out_dir}` — one subfolder per song.")
+        elif out_dir.exists():
             zip_path = zip_directory(out_dir)
             st.download_button(
                 "Download generated map (.zip)",
