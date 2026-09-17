@@ -60,7 +60,7 @@ beat-weaver download --min-score 0.75 --difficulty Easy Normal --output data/raw
 
 ### Step 2: Extract official maps (optional)
 
-If you have Beat Saber installed via Steam, you can also extract the official/DLC maps you already own. These are higher quality and weighted at 20% of each training batch.
+If you have Beat Saber installed via Steam, you can also extract the official/DLC maps you already own. `official_ratio` (default 0.2) oversamples them in each batch — **do not use 0.2 on a small Normal-only set**; that collapsed cube generation. `official_ratio=0` keeps official maps at natural frequency. See [HANDOFF.md](HANDOFF.md).
 
 ```bash
 # Windows (default Steam path)
@@ -120,30 +120,43 @@ On the first run, mel spectrograms are pre-computed and cached to `data/processe
 Training logs to TensorBoard:
 
 ```bash
-tensorboard --logdir output/training/tensorboard
+tensorboard --logdir output/training/logs
 ```
 
-### Step 6: Resume training (if interrupted)
+### Step 6: Resume or fine-tune
 
-Always resume from the `best/` checkpoint (never from numbered epoch checkpoints, which may be overwritten during training).
+Always resume an **interrupted** run from `best/` with `--resume` (restores optimizer, scaler, cosine step). Numbered epoch checkpoints may be overwritten.
+
+A **fine-tune** (new LR, scheduled sampling, extra audio features) must use `--init-from` so it does not reuse a fully decayed cosine schedule:
 
 ```bash
+# Interrupted run
 beat-weaver train \
   --config configs/large_conformer.json \
   --audio-manifest data/audio_manifest.json \
   --data data/processed \
   --output output/training \
   --resume output/training/checkpoints/best
+
+# Fine-tune from a finished checkpoint (fresh optimizer / LR)
+beat-weaver train \
+  --config configs/small_bombs_normal_ss.json \
+  --audio-manifest data/audio_manifest_normal_customs_only.json \
+  --data data/processed_normal_customs_only \
+  --output output/training_ss \
+  --init-from output/training_normal_customs_only/checkpoints/best
 ```
 
 ### Step 7: Generate a map
 
 ```bash
-# BPM is auto-detected from the audio
+# BPM is auto-detected from the audio.
+# Default: 4 seeds, keep the playability winner (NPS/parity gate).
 beat-weaver generate \
-  --checkpoint output/training/checkpoints/best \
+  --checkpoint output/training_normal_ss_from_2/checkpoints/best \
   --audio song.ogg \
-  --difficulty Expert \
+  --difficulty Normal \
+  --candidates 4 \
   --output my_map/
 
 # With explicit BPM and seed for reproducibility
@@ -169,11 +182,22 @@ The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to p
 ### Step 8: Evaluate (optional)
 
 ```bash
+# Generate metrics vs reference (optional --candidates to match ship-time picking)
 beat-weaver evaluate \
-  --checkpoint output/training/checkpoints/best \
-  --audio-manifest data/audio_manifest.json \
-  --data data/processed
+  --checkpoint output/training_normal_ss_from_2/checkpoints/best \
+  --audio-manifest data/audio_manifest_normal_customs_only.json \
+  --data data/processed_normal_customs_only \
+  --split val --mode generate --max-maps 50 --candidates 4
+
+# Class-wise teacher-forced token acc (cube vs empty vs bomb vs structure)
+beat-weaver evaluate \
+  --checkpoint output/training_normal_ss_from_2/checkpoints/best \
+  --audio-manifest data/audio_manifest_normal_customs_only.json \
+  --data data/processed_normal_customs_only \
+  --split val --mode teacher-forced
 ```
+
+Current generate checkpoint, scoreboard, and failed ablations: [HANDOFF.md](HANDOFF.md).
 
 ## All-in-One Pipeline
 
@@ -197,8 +221,8 @@ Audio (mel spectrogram + onset) -> [Conformer Encoder] -> [Token Decoder] -> Tok
 - **Encoder:** Linear projection + RoPE + Conformer blocks (FFN/2 + self-attention + depthwise conv + FFN/2 + LayerNorm). Falls back to standard Transformer with `use_conformer=false`.
 - **Decoder:** Token embedding + RoPE + Transformer decoder with cross-attention to encoder
 - **Audio features:** Log-mel spectrogram (80 bins) with onset strength channel
-- **Training:** AdamW + cosine LR, mixed-precision (fp16), SpecAugment, color balance loss, dataset filtering by difficulty/characteristic/BPM, weighted sampling (official maps oversampled)
-- **Inference:** Autoregressive generation with grammar constraints ensuring valid map structure. Windowed generation with overlap stitching for songs of any length.
+- **Training:** AdamW + cosine LR, mixed-precision (fp16), SpecAugment, optional scheduled sampling, color balance loss, dataset filtering by difficulty/characteristic/BPM, weighted sampling (`official_ratio`; `0` = natural frequency)
+- **Inference:** Autoregressive generation with grammar constraints. Windowed overlap stitching for long songs. `--candidates N` rescores seeds with a playability gate (NPS + parity).
 
 See [RESEARCH.md](RESEARCH.md) for research details and [plans/](plans/) for implementation plans.
 
@@ -208,7 +232,8 @@ See [RESEARCH.md](RESEARCH.md) for research details and [plans/](plans/) for imp
 - **ML model** — complete (tokenizer, audio preprocessing, Conformer/Transformer encoder, training loop, inference, exporter, evaluation)
 - **Baseline training** — complete (small model: 16 epochs, 23K songs, 60.6% token accuracy, generates playable maps)
 - **Model improvements** — complete (dataset filtering, SpecAugment, onset features, RoPE, color balance loss, Conformer encoder)
-- **Conformer training** — complete (9.4M params, best val_loss=2.23, 59.4% accuracy at epoch 26, Expert+ only)
+- **Conformer training** — complete (9.4M params, val_loss=2.23, 59.4% token acc, Expert+ only)
+- **Normal generate stack** — scheduled sampling + `--candidates 4`; current ship F1 0.259 on a 50-song val pack ([HANDOFF.md](HANDOFF.md))
 
 ## Tests
 

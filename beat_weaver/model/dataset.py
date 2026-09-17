@@ -535,8 +535,9 @@ def build_weighted_sampler(
     Custom maps are weighted by their BeatSaver score (higher-rated maps
     sampled more often).
 
-    Returns ``None`` if all samples come from a single source (no
-    rebalancing needed).
+    Returns ``None`` (plain shuffle, natural source frequency) if all
+    samples come from a single source, or if ``official_ratio <= 0`` —
+    that flag means "DLC stays in the pool, do not oversample it".
     """
     official_indices = []
     custom_indices = []
@@ -555,6 +556,18 @@ def build_weighted_sampler(
 
     # No rebalancing needed if only one source present
     if n_official == 0 or n_custom == 0:
+        return None
+
+    # official_ratio=0 means "in the pool, not oversampled": every sample
+    # once per epoch (plain shuffle). The oversampling formula below would
+    # instead give official maps weight 0 and silently drop them from train
+    # while leaving them in val.
+    if official_ratio <= 0:
+        logger.info(
+            "Weighted sampler disabled: official_ratio=%.2f, %d official and %d custom "
+            "will be drawn at natural frequency",
+            official_ratio, n_official, n_custom,
+        )
         return None
 
     # Compute weights so official samples collectively account for

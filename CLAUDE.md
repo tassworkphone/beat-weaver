@@ -2,6 +2,8 @@
 
 An AI-powered mod for Beat Saber that generates custom note maps from audio files.
 
+**Current generate handoff:** [HANDOFF.md](HANDOFF.md) — ship checkpoint, scoreboard, what not to retry.
+
 ## Project Overview
 
 Given an audio file as input, the system generates block positions and orientations (for both left and right sabers) at a regular sample rate (~20 Hz). The goal is a machine learning model that produces playable, enjoyable Beat Saber tracks automatically.
@@ -16,9 +18,10 @@ Given an audio file as input, the system generates block positions and orientati
 6. **Full-Song Generation** (complete) — Windowed inference with overlap stitching for songs of any length
 7. **Bombs** (complete) — Model-native compound token (`include_bombs` config flag, opt-in, vocab 291→304)
 8. **Walls/Obstacles** (complete) — Rule-based post-processing (`beat_weaver.model.obstacles`), stats mined from real Parquet data with outlier filtering (community "wall art" maps pollute raw obstacle data — see Open Questions)
-9. **Official DLC as training data** (complete) — `extract-official` pulls base game + all owned DLC (332 levels extracted from a full-DLC install, far more than the original 214); official maps get oversampled via `official_ratio` for quality/consistency. **Personal use only** — official/DLC maps are Beat Saber's copyrighted content, extracted only from an install the user already owns; a checkpoint (or generated maps) trained using this data shouldn't be redistributed or shared. Docs here describe how the mechanism works, not a recommendation for what to include in a model meant to be shared — that call is left to whoever's building it.
+9. **Official DLC as training data** (complete, **do not oversample on small Normal sets**) — `extract-official` pulls base game + owned DLC. `official_ratio=0.2` on ~2k Normal customs **collapsed cube generate** (see [HANDOFF.md](HANDOFF.md)). `official_ratio=0` is natural-frequency shuffle, not “drop official.” **Personal use only** for official/DLC content.
 10. **Arcs** (data pipeline + rule-based generator complete; exporter wiring pending — see Open Questions) / **Chains** (not started, no validated approach yet)
-11. **Feedback System / Self-Improvement Loop** (future) — See Open Questions
+11. **Generate stack** (current ship) — scheduled sampling fine-tune from Normal-only `#2` + `--candidates 4` playability picker. See [HANDOFF.md](HANDOFF.md).
+12. **Feedback System / Self-Improvement Loop** (future) — See Open Questions
 
 ## Beat Saber Map Format Quick Reference
 
@@ -47,11 +50,11 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 | `beat-weaver build-manifest` | Build audio manifest from raw map folders |
 | `beat-weaver process` | Normalize raw maps to Parquet (optional `--difficulty` physically excludes other difficulties from the output, not just at training time) |
 | `beat-weaver run` | Full pipeline (all sources) |
-| `beat-weaver train` | Train the ML model |
-| `beat-weaver generate` | Generate a Beat Saber map from audio (bombs if checkpoint trained with them; walls always, unless `--no-obstacles`) |
+| `beat-weaver train` | Train the ML model (`--resume` full state; `--init-from` weights-only fine-tune) |
+| `beat-weaver generate` | Generate a map (default `--candidates 4` + NPS/parity gate; bombs if checkpoint trained with them; walls unless `--no-obstacles`) |
 | `beat-weaver analyze-obstacles` | Mine real wall placement stats (density/duration/width/crouch-ratio) from processed data, filtering out modded/"wall art" outliers |
 | `beat-weaver analyze-arcs` | Mine real arc/slider placement stats (density/time-gap/movement) from processed data |
-| `beat-weaver evaluate` | Evaluate model on test data |
+| `beat-weaver evaluate` | Score a checkpoint (`--mode teacher-forced\|generate\|both`, `--split`, `--candidates`, class-wise cube/bomb acc) |
 
 **Key modules:**
 - `beat_weaver.parsers.beatmap_parser.parse_map_folder(path)` — parse any map folder
@@ -65,11 +68,11 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 - `beat_weaver.model.transformer` — AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel (RoPE or sinusoidal PE)
 - `beat_weaver.model.inference` — autoregressive generation with grammar mask + windowed full-song generation
 - `beat_weaver.model.exporter` — token sequence or note list → playable v2 map folder
-- `beat_weaver.model.evaluate` — onset F1, NPS accuracy, parity, diversity metrics
+- `beat_weaver.model.evaluate` — onset F1, NPS, parity, diversity; class-wise TF acc; playability gate / candidate picker
 
 **Output format:** `data/processed/notes_NNNN.parquet` (one row group per song, split at 1 GB) with columns: song_hash, source, difficulty, characteristic, bpm, beat, time_seconds, x, y, color, cut_direction, angle_offset. Reader (`read_notes_parquet`) handles both multi-file and legacy single-file layouts.
 
-**Model configs:** `configs/small.json` (1M params, batch_size=32) for fast iteration. `configs/small_bombs.json` (same size, `include_bombs=true`, vocab_size=304) — the CPU/small-GPU-appropriate config with bombs. `configs/medium.json` (6.5M params, 4L/256d) for standard transformer. `configs/medium_conformer.json` (9.4M params, Conformer, 8GB VRAM). `configs/large_conformer.json` (62M params, 6L/512d, Conformer, 24GB+ VRAM) for full training.
+**Model configs:** `configs/small.json` (1M params, batch_size=32) for fast iteration. `configs/small_bombs.json` (same size, `include_bombs=true`, vocab_size=304). `configs/small_bombs_normal_only.json` — Normal-only `#2` recipe. `configs/small_bombs_normal_ss.json` — SS fine-tune (ship). `configs/medium.json` (6.5M params, 4L/256d). `configs/medium_conformer.json` (9.4M params, 8GB VRAM). `configs/large_conformer.json` (62M params, 24GB+ VRAM).
 
 **Tests:** `python -m pytest tests/ -v` (255 tests; ML tests skipped without `.[ml]` deps)
 
@@ -86,10 +89,10 @@ See [RESEARCH.md](RESEARCH.md) for research details, [plans/002-ml-model.md](pla
 - **Scope:** Color notes (model-native) + bombs (model-native, opt-in `include_bombs`) + walls (rule-based post-processing, not model-native — see `beat_weaver.model.obstacles`). Arcs now have full parser/Parquet/mining/generation support (`beat_weaver.model.arcs`, rule-based post-processing like walls) but aren't wired into the exporter/CLI yet — see Open Questions. Chains not yet implemented, no validated approach yet.
 - **Output:** Beat-quantized compound tokens (291 vocab) → v2 Beat Saber JSON
 - **Token format:** `START DIFF BAR POS LEFT RIGHT ... BAR ... END`
-- **Training:** Cross-entropy with label smoothing + optional color balance auxiliary loss, AdamW + cosine LR, mixed-precision, early stopping, weighted sampling (official 20% of batch, custom weighted by BeatSaver score)
+- **Training:** Cross-entropy with label smoothing + optional color balance auxiliary loss, AdamW + cosine LR, mixed-precision, early stopping, optional scheduled sampling (`scheduled_sampling_prob`), weighted sampling (`official_ratio`; `<=0` = natural frequency, not drop-official)
 - **Data augmentation:** SpecAugment (time/frequency masking, training split only)
 - **Data filtering:** By difficulty (min_difficulty), characteristic, BPM range. Out-of-grid notes filtered during pre-tokenization.
-- **Inference:** Autoregressive with grammar-constrained decoding (strictly increasing POS per bar), temperature/top-k/top-p sampling, windowed full-song generation with overlap stitching
+- **Inference:** Autoregressive with grammar-constrained decoding (strictly increasing POS per bar), temperature/top-k/top-p sampling, windowed full-song generation with overlap stitching. Generate CLI draws `--candidates` seeds and keeps the playability winner (NPS floor + parity gate).
 - **Evaluation:** Onset F1, parity violation rate, NPS accuracy, beat alignment, pattern diversity
 - **Mel pre-caching:** `warm_mel_cache()` computes all spectrograms in parallel before training starts (ProcessPoolExecutor, ~25min for 14K songs). Cache versioned and auto-invalidated on config change.
 - **Full-song generation:** `generate_full_song()` processes audio in overlapping windows (25% overlap, capped at 1024 frames), decodes each window's tokens to notes with beat offsets, and merges using midpoint ownership to eliminate duplicates. Songs of any length are supported. `export_notes()` writes a merged note list directly to v2 map format.
@@ -104,7 +107,7 @@ Best model after 16 epochs: **val_loss=2.055, 60.6% token accuracy**. Model plat
 
 Training diverged after epoch 4 with `learning_rate=1e-4`: train loss dropped (4.26 → 2.0) but val loss exploded (5.26 → 13.4). Root cause: LR too aggressive for the larger model — not overfitting but optimization instability.
 
-### Medium Conformer (9.4M params, Expert+ only) — current best
+### Medium Conformer (9.4M params, Expert+ only)
 
 Training with `configs/medium_conformer.json` (LR=3e-5, warmup=1000, batch_size=8). Best model at epoch 26/50: **val_loss=2.2324, 59.44% token accuracy**. Training continued 10 more epochs with no val loss improvement (early stopping). Train loss continued decreasing, indicating the model began overfitting on the Expert+-only dataset (~18K samples).
 
@@ -123,13 +126,21 @@ Comparable to the small model baseline (60.6% on all difficulties) despite train
 
 ### Small + Bombs (1.4M params, GPU)
 
-`configs/small_bombs.json`, 30 epochs, ~1,963 BeatSaver songs (all difficulties): **val_loss=1.9663, 67.5% token accuracy** (epoch 27) — notably above the original 60.6% baseline, on GPU in ~68 min (RTX 3060). A second run added 332 extracted official DLC levels (~2,295 songs total, oversampled via `official_ratio`) — see `output/training_v2/` once complete.
+`configs/small_bombs.json`, 30 epochs, ~1,963 BeatSaver songs (all difficulties): **val_loss=1.9663, 67.5% token accuracy** (epoch 27).
 
-**Note on the ~60-68% accuracy ceiling:** likely dominated by the one-to-many nature of mapping (many valid note patterns exist for the same audio; token accuracy penalizes any deviation from one specific reference mapper's choice) plus mixed mapper skill/style in the BeatSaver corpus — not primarily a model-capacity problem. Evidence: scaling 1M→9.4M params barely moved accuracy (60.6%→59.4%). The onset F1 / parity violation / NPS accuracy / pattern diversity metrics in `evaluate.py` are more meaningful quality signals than raw token accuracy for this reason.
+**Current generate best (Normal customs):** isolate difficulty to Normal (`#2`, `output/training_normal_customs_only`), then fine-tune with scheduled sampling mix 0.25 (`output/training_normal_ss_from_2`) and ship with `--candidates 4`. **Generate onset F1 0.259** / NPS 1.75 / 49 of 50 maps in NPS 1.2–2.5 on a 50-song val pack. Token acc on that run is ~67% and is **not** the selection metric — see [HANDOFF.md](HANDOFF.md).
+
+Failed on this stack (do not retry without a new hypothesis): DLC @ `official_ratio=0.2` (cubes → 0%), bombs-off tokenizer (empty maps), more songs at BeatSaver 0.85 (TF cubes up, generate F1 down), extra onset mel bin (F1 0.259 → 0.246).
+
+**Note on the ~60-68% accuracy ceiling:** dominated by one-to-many mapping plus `EMPTY`/`BAR`/`POS` padding. On `#2`, real cube TF acc is ~29%; `BOMB_EMPTY` is ~23% of tokens at 100%. Onset F1 / parity / NPS band are the generate metrics.
 
 ## Open Questions
 
-- **Data filter broadening:** Expert+ only (~18K samples) limits the 9.4M param Conformer. Adding Expert maps would roughly double the dataset. (Moot for `small*.json` configs, which default to `min_difficulty="Easy"` — already maximally broad.)
+- **Onset as a decision, not a mel bin.** `use_onset_features` concatenates onset strength (+1 encoder input). Fine-tuned from SS; mean generate F1 did not improve. Next architecture cut is a binary “cube here” head / peak-pick lattice so the AR decoder cannot veto an onset by emitting empty. Keep SS + `--candidates 4` + 0.90 Normal data. Details in [HANDOFF.md](HANDOFF.md).
+
+- **Checkpoint selection on generate metrics.** Early-stop / pick still uses val_loss. The 0.85 and DLC runs would have been discarded earlier if generate F1 + NPS band were the gate.
+
+- **Data filter broadening:** Expert+ only (~18K samples) limits the 9.4M param Conformer. Adding Expert maps would roughly double the dataset. (Moot for `small*.json` configs, which default to `min_difficulty="Easy"` — already maximally broad.) Do **not** broaden the Normal generate stack with 0.85 maps or DLC oversampling.
 
 - **Arcs — data pipeline and rule-based generator complete; exporter wiring is the one piece left.** Originally guessed model-native (like bombs), corrected after reading [InfernoSaber's `map_creation/gen_sliders.py`](https://github.com/fred-brenner/InfernoSaber---BeatSaber-Automapper): arcs don't touch the model or tokenizer at all, same as walls. What's now built, mirroring `beat_weaver.model.obstacles` exactly:
   - `Arc` dataclass in `schemas/normalized.py` (head + tail position/color/cut-direction/multiplier, plus mid-anchor mode).

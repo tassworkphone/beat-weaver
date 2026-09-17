@@ -98,3 +98,30 @@ class TestCmdEvaluate:
             "song_hash", "difficulty",
         }
         assert expected_keys.issubset(results[0].keys())
+
+    def test_teacher_forced_writes_class_accuracy(self, tmp_path):
+        processed, manifest = _write_test_song(tmp_path)
+        ckpt_dir = tmp_path / "checkpoint"
+        _save_tiny_checkpoint(ckpt_dir)
+
+        output_path = tmp_path / "eval_tf.json"
+        args = argparse.Namespace(
+            checkpoint=str(ckpt_dir),
+            data=str(processed),
+            audio_manifest=str(manifest),
+            output=str(output_path),
+            split="test",
+            mode="teacher-forced",
+            max_maps=None,
+        )
+
+        cmd_evaluate(args)
+
+        report = json.loads(output_path.read_text())
+        assert "teacher_forced" in report
+        tf = report["teacher_forced"]
+        for key in ("overall", "cube", "cube_empty", "bomb", "bomb_empty", "structure"):
+            assert key in tf
+            assert "correct" in tf[key]
+            assert "total" in tf[key]
+        assert tf["overall"]["total"] > 0

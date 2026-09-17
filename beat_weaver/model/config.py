@@ -77,6 +77,27 @@ class ModelConfig:
     # Data augmentation
     spec_augment_strength: float = 1.0  # Multiplier on SpecAugment mask count/width
 
+    # Scheduled sampling (0 = pure teacher forcing). Mixes the model's own
+    # previous-token predictions into the decoder input so train-time
+    # exposure matches autoregressive generate. Fine-tune from a TF
+    # checkpoint with a low LR; do not turn this on from scratch at 0.5.
+    scheduled_sampling_prob: float = 0.0
+    scheduled_sampling_ramp_epochs: int = 0  # 0 = constant at prob; else linear 0→prob
+
+    # Binary "cube here" head: an auxiliary per-audio-frame classifier on top
+    # of the encoder output, predicting whether a note/bomb event happens at
+    # that frame. Addresses the AR decoder's tendency to skip real onsets
+    # (choosing BAR over POS) by giving generate() a direct, non-autoregressive
+    # signal for where events belong, instead of only an extra mel input
+    # feature (tried as use_onset_features; didn't beat scheduled sampling).
+    use_cube_head: bool = False  # Attach the head at all (opt-in, changes state_dict)
+    cube_head_weight: float = 0.0  # Auxiliary BCE loss weight during training (0 = off)
+    cube_head_bias_scale: float = 0.0  # Inference-time logit bias strength (0 = off)
+    cube_head_pos_weight: float = 1.0  # BCE pos_weight — active frames are rare
+    # (~4-5% of frames); 1.0 (no reweighting) lets the head trivially collapse
+    # to "always inactive" (>95% accuracy for doing nothing). Raise toward the
+    # true imbalance ratio if val_cube_accuracy is flat at ~1 - positive_rate.
+
     def save(self, path: Path) -> None:
         """Save config to JSON file."""
         path = Path(path)

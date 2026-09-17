@@ -216,10 +216,26 @@ def generate(
     # Encode audio once
     memory = model.encoder(mel, mel_mask)
 
+    # Binary "cube here" head bias: one logit per audio frame, added to the
+    # matching POS_p logit so the decoder is nudged toward real onsets
+    # instead of skipping straight to BAR. Computed once up front since the
+    # audio encoding doesn't change across steps. No-op unless the model has
+    # the head and config.cube_head_bias_scale > 0 (see ModelConfig).
+    cube_bias = None
+    if (
+        config.use_cube_head
+        and config.cube_head_bias_scale > 0
+        and getattr(model, "cube_head", None) is not None
+    ):
+        cube_bias = (
+            model.cube_head(memory).squeeze(-1).squeeze(0) * config.cube_head_bias_scale
+        )  # (T_audio,)
+
     # Start with [START, DIFF_x]
     diff_token = difficulty_to_token(difficulty)
     tokens = [START, diff_token]
     last_pos_in_bar = -1  # Track last POS offset in current bar
+    current_bar = -1  # Track bar index to map POS_p -> absolute audio frame
 
     max_tokens = _max_generation_tokens(mel_spectrogram.shape[1], config.max_seq_len)
     for _ in range(max_tokens - 2):
@@ -237,6 +253,16 @@ def generate(
         ).to(device)
         next_logits[~grammar_mask] = float("-inf")
 
+        # Bias POS logits toward frames the cube head thinks are real onsets.
+        # Frame = current_bar * SUBDIVISIONS_PER_BAR + p, matching how
+        # generate_full_song already maps frames to beats.
+        if cube_bias is not None and current_bar >= 0:
+            frame_start = current_bar * SUBDIVISIONS_PER_BAR
+            frame_end = min(frame_start + POS_COUNT, cube_bias.size(0))
+            n = frame_end - frame_start
+            if n > 0:
+                next_logits[POS_BASE: POS_BASE + n] += cube_bias[frame_start:frame_end]
+
         # Sample
         next_token = _sample_with_filter(next_logits, temperature, top_k, top_p)
         tokens.append(next_token)
@@ -244,6 +270,7 @@ def generate(
         # Update position tracking
         if next_token == BAR:
             last_pos_in_bar = -1  # Reset on new bar
+            current_bar += 1
         elif POS_BASE <= next_token < POS_BASE + POS_COUNT:
             last_pos_in_bar = next_token - POS_BASE
 

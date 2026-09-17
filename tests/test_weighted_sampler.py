@@ -35,6 +35,19 @@ def test_returns_none_for_all_official():
     assert build_weighted_sampler(ds, official_ratio=0.2) is None
 
 
+def test_returns_none_when_official_ratio_zero():
+    """official_ratio=0 must not zero official weights (that would drop DLC
+    from train while leaving it in val). Natural-frequency shuffle instead."""
+    ds = _make_dataset([
+        {"source": "official", "score": None},
+        {"source": "official", "score": None},
+        {"source": "beatsaver", "score": 0.80},
+        {"source": "beatsaver", "score": 0.90},
+    ])
+    assert build_weighted_sampler(ds, official_ratio=0.0) is None
+    assert build_weighted_sampler(ds, official_ratio=0) is None
+
+
 def test_returns_sampler_for_mixed_sources():
     ds = _make_dataset([
         {"source": "official", "score": None},

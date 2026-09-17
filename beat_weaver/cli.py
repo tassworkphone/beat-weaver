@@ -189,7 +189,11 @@ def cmd_train(args: argparse.Namespace) -> None:
     print(f"Training: {len(train_ds)} samples, Validation: {len(val_ds)} samples")
 
     resume = Path(args.resume) if args.resume else None
-    best_ckpt = train(config, train_ds, val_ds, Path(args.output), resume_from=resume)
+    init_from = Path(args.init_from) if getattr(args, "init_from", None) else None
+    best_ckpt = train(
+        config, train_ds, val_ds, Path(args.output),
+        resume_from=resume, init_from=init_from,
+    )
     print(f"Training complete. Best checkpoint: {best_ckpt}")
 
 
@@ -229,25 +233,58 @@ def _generate_one(model, config, device, args, audio_path: Path, output: Path) -
 
     obstacle_stats = load_obstacle_stats(Path(args.obstacle_stats)) if args.obstacle_stats else None
 
+    from beat_weaver.model.evaluate import (
+        evaluate_standalone,
+        select_playable_candidate,
+    )
+
+    n_candidates = max(1, int(getattr(args, "candidates", 4)))
+    require_gate = not bool(getattr(args, "no_gate", False))
+    base_seed = args.seed if args.seed is not None else 0
+
     maps = {}
     summary = []
     for difficulty in args.difficulty:
-        all_events = generate_full_song(
-            model, mel_tensor, difficulty, config, bpm,
-            temperature=args.temperature,
-            seed=args.seed,
+        pool: list[tuple[list, list, dict]] = []
+        scored_pairs: list[tuple[list, dict]] = []
+        for i in range(n_candidates):
+            seed = base_seed + i
+            all_events = generate_full_song(
+                model, mel_tensor, difficulty, config, bpm,
+                temperature=args.temperature,
+                seed=seed,
+            )
+            # decode_tokens (called inside generate_full_song) represents bombs
+            # as color=3 Note entries — split them back out before obstacles.
+            notes = [n for n in all_events if n.color in (0, 1)]
+            bombs = [n for n in all_events if n.color == 3]
+            metrics = evaluate_standalone(notes, bpm)
+            pool.append((notes, bombs, metrics))
+            scored_pairs.append((notes, metrics))
+
+        idx, passed, score = select_playable_candidate(
+            scored_pairs, difficulty, require_gate=require_gate,
         )
-        # decode_tokens (called inside generate_full_song) represents bombs as
-        # color=3 Note entries — split them back out before obstacle placement/export.
-        notes = [n for n in all_events if n.color in (0, 1)]
-        bombs = [n for n in all_events if n.color == 3]
+        notes, bombs, metrics = pool[idx]
 
         obstacles = []
         if not args.no_obstacles:
             obstacles = generate_obstacles(notes, bombs, bpm, difficulty, stats=obstacle_stats)
 
         maps[difficulty] = (notes + bombs, obstacles)
-        summary.append(f"{difficulty}: {len(notes)} notes, {len(bombs)} bombs, {len(obstacles)} obstacles")
+        gate_flag = "pass" if passed else "FAIL"
+        summary.append(
+            f"{difficulty}: {len(notes)} notes, {len(bombs)} bombs, "
+            f"{len(obstacles)} obstacles  "
+            f"[seed={base_seed + idx} {gate_flag} score={score:.3f} "
+            f"nps={metrics['nps']:.2f} parity={metrics['parity_violation_rate']:.3f} "
+            f"of {n_candidates} candidates]"
+        )
+        if require_gate and not passed:
+            print(
+                f"  warning: {difficulty} failed the playability gate "
+                f"(empty/low NPS or high parity); shipped best of {n_candidates}"
+            )
 
     song_name = audio_path.stem
     export_multi_difficulty(maps, bpm, song_name, audio_path, output)
@@ -303,62 +340,162 @@ def cmd_generate(args: argparse.Namespace) -> None:
         _generate_one(model, config, device, args, Path(args.audio), output)
 
 
+def _normalize_checkpoints(checkpoint) -> list[Path]:
+    if isinstance(checkpoint, (str, Path)):
+        return [Path(checkpoint)]
+    return [Path(c) for c in checkpoint]
+
+
+def _format_acc(stats: dict) -> str:
+    acc = stats.get("accuracy")
+    total = stats.get("total", 0)
+    if not total or acc is None:
+        return f"{'n/a':>8}  ({stats.get('correct', 0)}/{total})"
+    return f"{acc * 100:7.2f}%  ({stats['correct']}/{total})"
+
+
+def _print_class_accuracy(label: str, class_acc: dict) -> None:
+    print(f"\n{label}")
+    print(f"  {'class':<14} {'acc':>8}  correct/total")
+    for name in ("overall", "cube", "cube_empty", "bomb", "bomb_empty", "structure"):
+        if name in class_acc:
+            print(f"  {name:<14} {_format_acc(class_acc[name])}")
+
+
 def cmd_evaluate(args: argparse.Namespace) -> None:
     import json as _json
+    import sys
     import torch
-    from beat_weaver.model.audio import (
-        compute_mel_spectrogram, load_audio, load_manifest, beat_align_spectrogram,
-    )
+    from torch.utils.data import DataLoader
+
     from beat_weaver.model.config import ModelConfig
-    from beat_weaver.model.dataset import BeatSaberDataset
-    from beat_weaver.model.evaluate import evaluate_map
+    from beat_weaver.model.dataset import BeatSaberDataset, collate_fn
+    from beat_weaver.model.evaluate import (
+        evaluate_map,
+        evaluate_standalone,
+        mean_map_metrics,
+        select_playable_candidate,
+        teacher_forced_class_accuracy,
+    )
     from beat_weaver.model.inference import generate
     from beat_weaver.model.tokenizer import decode_tokens
     from beat_weaver.model.transformer import BeatWeaverModel
 
-    ckpt_dir = Path(args.checkpoint)
-    config = ModelConfig.load(ckpt_dir / "config.json")
+    ckpt_dirs = _normalize_checkpoints(args.checkpoint)
+    split = getattr(args, "split", "test")
+    mode = getattr(args, "mode", "generate")
+    max_maps = getattr(args, "max_maps", None)
+    n_candidates = max(1, int(getattr(args, "candidates", 1)))
+    require_gate = not bool(getattr(args, "no_gate", False))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = BeatWeaverModel(config)
-    model.load_state_dict(
-        torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
+    first_config = ModelConfig.load(ckpt_dirs[0] / "config.json")
+    dataset = BeatSaberDataset(
+        Path(args.data), Path(args.audio_manifest), first_config, split=split,
     )
-    model.to(device)
-    model.eval()
+    n_maps = len(dataset)
+    gen_limit = n_maps if max_maps is None else min(n_maps, max_maps)
 
-    test_ds = BeatSaberDataset(Path(args.data), Path(args.audio_manifest), config, split="test")
-    results = []
+    reports = []
+    for ckpt_dir in ckpt_dirs:
+        config = ModelConfig.load(ckpt_dir / "config.json")
+        model = BeatWeaverModel(config)
+        model.load_state_dict(
+            torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
+        )
+        model.to(device)
+        model.eval()
 
-    for i in range(len(test_ds)):
-        mel, tokens, mask = test_ds[i]
-        sample = test_ds.samples[i]
+        report: dict = {
+            "checkpoint": str(ckpt_dir),
+            "split": split,
+            "n_samples": n_maps,
+        }
 
-        # Greedy decoding (temperature=0) degenerates into a repetition trap for
-        # this model — it gets stuck predicting BAR/POS_EMPTY forever and never
-        # places a note or reaches END. Sample instead (matching production
-        # generate() defaults), with a per-sample fixed seed for reproducible
-        # evaluation runs.
-        gen_tokens = generate(model, mel, sample["difficulty"], config, temperature=1.0, seed=i)
-        gen_notes = decode_tokens(gen_tokens, sample["bpm"], include_bombs=config.include_bombs)
-        # Exclude decoded bomb entries (color=3) from both sides for an
-        # apples-to-apples color-note comparison.
-        gen_notes = [n for n in gen_notes if n.color in (0, 1)]
+        if mode in ("teacher-forced", "both"):
+            use_cuda = device.type == "cuda"
+            loader = DataLoader(
+                dataset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                collate_fn=collate_fn,
+                num_workers=0 if sys.platform == "win32" else (2 if use_cuda else 0),
+                pin_memory=use_cuda,
+            )
+            class_acc = teacher_forced_class_accuracy(model, loader, device)
+            report["teacher_forced"] = class_acc
+            _print_class_accuracy(f"Teacher-forced  {ckpt_dir}", class_acc)
 
-        # dataset.py frees the raw `notes` dicts after tokenization (memory
-        # optimization for training) — reconstruct reference notes from the
-        # already-kept token_ids instead of the (no longer present) raw notes.
-        ref_notes = decode_tokens(sample["token_ids"], sample["bpm"], include_bombs=config.include_bombs)
-        ref_notes = [n for n in ref_notes if n.color in (0, 1)]
+        if mode in ("generate", "both"):
+            maps = []
+            n_gate_pass = 0
+            for i in range(gen_limit):
+                mel, _tokens, _mask = dataset[i]
+                sample = dataset.samples[i]
+                difficulty = sample["difficulty"]
+                # Greedy decoding (temperature=0) degenerates into a repetition
+                # trap. Sample instead, with a per-sample base seed. When
+                # --candidates > 1, draw extra seeds and keep the playability
+                # winner (same picker as `generate`).
+                scored_pairs = []
+                cand_notes = []
+                for k in range(n_candidates):
+                    gen_tokens = generate(
+                        model, mel, difficulty, config,
+                        temperature=1.0, seed=i + k,
+                    )
+                    notes = decode_tokens(
+                        gen_tokens, sample["bpm"], include_bombs=config.include_bombs,
+                    )
+                    notes = [n for n in notes if n.color in (0, 1)]
+                    cand_notes.append(notes)
+                    scored_pairs.append((notes, evaluate_standalone(notes, sample["bpm"])))
+                idx, passed, score = select_playable_candidate(
+                    scored_pairs, difficulty, require_gate=require_gate,
+                )
+                n_gate_pass += int(passed)
+                gen_notes = cand_notes[idx]
+                ref_notes = decode_tokens(
+                    sample["token_ids"], sample["bpm"], include_bombs=config.include_bombs,
+                )
+                ref_notes = [n for n in ref_notes if n.color in (0, 1)]
+                metrics = evaluate_map(gen_notes, ref_notes, sample["bpm"])
+                metrics["song_hash"] = sample["song_hash"]
+                metrics["difficulty"] = difficulty
+                metrics["candidate_index"] = idx
+                metrics["gate_pass"] = passed
+                metrics["playability_score"] = score
+                maps.append(metrics)
 
-        metrics = evaluate_map(gen_notes, ref_notes, sample["bpm"])
-        metrics["song_hash"] = sample["song_hash"]
-        metrics["difficulty"] = sample["difficulty"]
-        results.append(metrics)
+            summary = mean_map_metrics(maps)
+            report["generated"] = {
+                "n": len(maps),
+                "candidates": n_candidates,
+                "gate_pass": n_gate_pass,
+                "mean": summary,
+                "maps": maps,
+            }
+            print(
+                f"\nGenerated cube metrics  {ckpt_dir}  "
+                f"(n={len(maps)}, candidates={n_candidates}, gate_pass={n_gate_pass})"
+            )
+            for key, value in summary.items():
+                print(f"  {key:<24} {value:.4f}")
+
+        reports.append(report)
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     output_path = Path(args.output) if args.output else Path("evaluation_results.json")
-    output_path.write_text(_json.dumps(results, indent=2), encoding="utf-8")
-    print(f"Evaluated {len(results)} maps. Results: {output_path}")
+    # Preserve the original generate-only single-checkpoint JSON shape (a list
+    # of per-map dicts) so existing consumers/tests keep working.
+    if mode == "generate" and len(reports) == 1:
+        payload = reports[0]["generated"]["maps"]
+    else:
+        payload = reports if len(reports) > 1 else reports[0]
+    output_path.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\nEvaluated {n_maps} samples ({mode}). Results: {output_path}")
 
 
 def cmd_analyze_obstacles(args: argparse.Namespace) -> None:
@@ -485,6 +622,11 @@ def main() -> None:
     tr.add_argument("--epochs", type=int, default=None, help="Max epochs")
     tr.add_argument("--batch-size", type=int, default=None, help="Batch size")
     tr.add_argument("--resume", default=None, help="Resume from checkpoint directory")
+    tr.add_argument(
+        "--init-from", default=None,
+        help="Load model weights only and start a fresh run (new optimizer/LR). "
+             "Use for fine-tunes; do not combine with --resume",
+    )
 
     # generate
     gen = sub.add_parser("generate", help="Generate a Beat Saber map from audio")
@@ -504,6 +646,14 @@ def main() -> None:
                      help="Song BPM (auto-detected from audio if not provided)")
     gen.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     gen.add_argument("--seed", type=int, default=None, help="Random seed")
+    gen.add_argument(
+        "--candidates", type=int, default=4,
+        help="Draw this many seeds and keep the best playability score (default: 4)",
+    )
+    gen.add_argument(
+        "--no-gate", action="store_true",
+        help="Do not prefer candidates that pass the NPS/parity ship gate",
+    )
     gen.add_argument("--no-obstacles", action="store_true",
                      help="Skip rule-based wall/obstacle placement")
     gen.add_argument("--obstacle-stats", default="data/processed/obstacle_stats.json",
@@ -524,10 +674,37 @@ def main() -> None:
 
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")
-    ev.add_argument("--checkpoint", required=True, help="Model checkpoint directory")
+    ev.add_argument(
+        "--checkpoint", required=True, nargs="+",
+        help="Model checkpoint directory (repeat to compare several on the same split)",
+    )
     ev.add_argument("--data", default="data/processed", help="Test data directory")
     ev.add_argument("--audio-manifest", required=True, help="Audio manifest JSON path")
     ev.add_argument("--output", default=None, help="Output JSON path for results")
+    ev.add_argument(
+        "--split", default="test", choices=["train", "val", "test"],
+        help="Dataset split to score (default: test)",
+    )
+    ev.add_argument(
+        "--mode", default="generate",
+        choices=["generate", "teacher-forced", "both"],
+        help="generate: cube playability vs reference maps; "
+             "teacher-forced: class-wise token accuracy (cube vs bomb vs structure); "
+             "both: run each",
+    )
+    ev.add_argument(
+        "--max-maps", type=int, default=None,
+        help="Cap generated-map scoring to the first N samples of the split",
+    )
+    ev.add_argument(
+        "--candidates", type=int, default=1,
+        help="Draw this many seeds per song and keep the playability winner "
+             "(default: 1, matching prior evaluate runs)",
+    )
+    ev.add_argument(
+        "--no-gate", action="store_true",
+        help="Rank candidates by playability score only; do not prefer gate-passers",
+    )
 
     args = parser.parse_args()
     logging.basicConfig(

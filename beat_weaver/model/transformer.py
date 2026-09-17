@@ -564,6 +564,11 @@ class BeatWeaverModel(nn.Module):
         self.config = config
         self.encoder = AudioEncoder(config)
         self.decoder = TokenDecoder(config)
+        # Binary "cube here" auxiliary head — one logit per audio frame,
+        # predicting whether a note/bomb event happens there. Only attached
+        # when opted into via config (changes the state_dict), so existing
+        # checkpoints load unaffected. See ModelConfig.use_cube_head.
+        self.cube_head = nn.Linear(config.encoder_dim, 1) if config.use_cube_head else None
 
     def forward(
         self,
@@ -571,7 +576,8 @@ class BeatWeaverModel(nn.Module):
         tokens: torch.Tensor,
         mel_mask: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_cube: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Teacher-forced forward pass.
 
         Args:
@@ -579,13 +585,21 @@ class BeatWeaverModel(nn.Module):
             tokens: (batch, T_tokens) — input token IDs (shifted right)
             mel_mask: (batch, T_audio) — True for valid audio positions
             token_mask: (batch, T_tokens) — True for valid token positions
+            return_cube: if True, also return cube-head logits (or None if
+                the model has no cube_head) — existing callers that don't
+                pass this get the exact same single-tensor return as before.
 
         Returns:
-            (batch, T_tokens, vocab_size) — logits for next token prediction
+            (batch, T_tokens, vocab_size) — logits for next token prediction.
+            If return_cube: (logits, cube_logits) where cube_logits is
+            (batch, T_audio) or None.
         """
         memory = self.encoder(mel, mel_mask)
         logits = self.decoder(tokens, memory, token_mask, mel_mask)
-        return logits
+        if not return_cube:
+            return logits
+        cube_logits = self.cube_head(memory).squeeze(-1) if self.cube_head is not None else None
+        return logits, cube_logits
 
     def count_parameters(self) -> int:
         """Count total trainable parameters."""

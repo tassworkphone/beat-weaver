@@ -139,6 +139,79 @@ class TestBeatWeaverModel:
         assert isinstance(count, int)
 
 
+class TestCubeHead:
+    """Binary 'cube here' auxiliary head — see ModelConfig.use_cube_head."""
+
+    def test_no_head_by_default(self, small_config):
+        model = BeatWeaverModel(small_config)
+        assert model.cube_head is None
+
+    def test_default_forward_unaffected(self, small_config):
+        """return_cube=False (the default) must return the exact same single
+        tensor as before this feature existed — no behavior change for
+        every existing caller that doesn't pass return_cube."""
+        model = BeatWeaverModel(small_config)
+        mel = torch.randn(2, 80, 50)
+        tokens = torch.randint(0, 291, (2, 20))
+        logits = model(mel, tokens)
+        assert isinstance(logits, torch.Tensor)
+        assert logits.shape == (2, 20, 291)
+
+    def test_head_created_when_enabled(self):
+        config = ModelConfig(
+            vocab_size=291, max_seq_len=128, n_mels=80,
+            encoder_layers=2, encoder_dim=64, encoder_heads=4, encoder_ff_dim=128,
+            decoder_layers=2, decoder_dim=64, decoder_heads=4, decoder_ff_dim=128,
+            dropout=0.0, use_cube_head=True,
+        )
+        model = BeatWeaverModel(config)
+        assert model.cube_head is not None
+        assert isinstance(model.cube_head, torch.nn.Linear)
+
+    def test_return_cube_shape(self):
+        config = ModelConfig(
+            vocab_size=291, max_seq_len=128, n_mels=80,
+            encoder_layers=2, encoder_dim=64, encoder_heads=4, encoder_ff_dim=128,
+            decoder_layers=2, decoder_dim=64, decoder_heads=4, decoder_ff_dim=128,
+            dropout=0.0, use_cube_head=True,
+        )
+        model = BeatWeaverModel(config)
+        mel = torch.randn(2, 80, 50)
+        tokens = torch.randint(0, 291, (2, 20))
+        logits, cube_logits = model(mel, tokens, return_cube=True)
+        assert logits.shape == (2, 20, 291)
+        assert cube_logits.shape == (2, 50)  # (batch, T_audio)
+
+    def test_return_cube_none_without_head(self, small_config):
+        """return_cube=True on a model without the head returns cube_logits=None
+        rather than raising — callers gate on config.use_cube_head anyway, but
+        this keeps forward() itself safe either way."""
+        model = BeatWeaverModel(small_config)
+        mel = torch.randn(2, 80, 50)
+        tokens = torch.randint(0, 291, (2, 20))
+        logits, cube_logits = model(mel, tokens, return_cube=True)
+        assert logits.shape == (2, 20, 291)
+        assert cube_logits is None
+
+    def test_cube_head_gradient_flows(self):
+        config = ModelConfig(
+            vocab_size=291, max_seq_len=128, n_mels=80,
+            encoder_layers=2, encoder_dim=64, encoder_heads=4, encoder_ff_dim=128,
+            decoder_layers=2, decoder_dim=64, decoder_heads=4, decoder_ff_dim=128,
+            dropout=0.0, use_cube_head=True,
+        )
+        model = BeatWeaverModel(config)
+        mel = torch.randn(2, 80, 50)
+        tokens = torch.randint(0, 291, (2, 20))
+        _, cube_logits = model(mel, tokens, return_cube=True)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            cube_logits, torch.zeros_like(cube_logits),
+        )
+        loss.backward()
+        assert model.cube_head.weight.grad is not None
+        assert not torch.all(model.cube_head.weight.grad == 0)
+
+
 class TestRoPE:
     @pytest.fixture
     def rope_config(self):

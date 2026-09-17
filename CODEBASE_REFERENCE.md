@@ -13,11 +13,11 @@ beat_weaver/
 │   ├── audio.py                         # Mel spectrogram extraction + beat-aligned framing + BPM detection + audio manifest
 │   ├── config.py                        # ModelConfig dataclass with all hyperparameters
 │   ├── dataset.py                       # PyTorch Dataset: Parquet + audio → (mel, tokens, mask)
-│   ├── evaluate.py                      # Quality metrics: onset F1, NPS accuracy, parity, diversity
+│   ├── evaluate.py                      # Onset F1, NPS, parity; class-wise TF acc; playability gate
 │   ├── exporter.py                      # Token sequence or note list → playable v2 Beat Saber map folder
 │   ├── inference.py                     # Autoregressive generation with grammar mask + windowed full-song generation
 │   ├── tokenizer.py                     # Token vocabulary (291), encode/decode beatmap ↔ tokens
-│   ├── training.py                      # Training loop: mixed-precision, checkpointing, early stopping, color balance loss
+│   ├── training.py                      # Training loop: AMP, scheduled sampling, --init-from, color balance loss
 │   └── transformer.py                   # AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel
 ├── parsers/
 │   ├── __init__.py

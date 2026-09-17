@@ -220,6 +220,62 @@ class TestGenerate:
         assert tokens[1] == DIFF_EXPERT
 
 
+class TestCubeHeadBias:
+    """Inference-time logit bias from the binary 'cube here' head."""
+
+    def _cube_model(self, bias_scale: float):
+        config = ModelConfig(
+            vocab_size=291, max_seq_len=64, n_mels=80,
+            encoder_layers=1, encoder_dim=32, encoder_heads=4, encoder_ff_dim=64,
+            decoder_layers=1, decoder_dim=32, decoder_heads=4, decoder_ff_dim=64,
+            dropout=0.0, use_cube_head=True, cube_head_bias_scale=bias_scale,
+        )
+        model = BeatWeaverModel(config)
+        return model, config
+
+    def test_bias_scale_zero_matches_no_cube_head(self):
+        """cube_head_bias_scale=0 must produce byte-identical output to a
+        model that doesn't have the head at all — the head's mere existence
+        (random init) must not leak into generation unless explicitly enabled."""
+        cube_model, cube_config = self._cube_model(bias_scale=0.0)
+        plain_config = ModelConfig(
+            vocab_size=291, max_seq_len=64, n_mels=80,
+            encoder_layers=1, encoder_dim=32, encoder_heads=4, encoder_ff_dim=64,
+            decoder_layers=1, decoder_dim=32, decoder_heads=4, decoder_ff_dim=64,
+            dropout=0.0, use_cube_head=False,
+        )
+        plain_model = BeatWeaverModel(plain_config)
+        # Copy shared weights so only cube_head differs between the two models.
+        plain_model.load_state_dict(cube_model.state_dict(), strict=False)
+
+        mel = torch.randn(80, 20)
+        t_cube = generate(cube_model, mel, "Expert", cube_config, temperature=0.5, seed=7)
+        t_plain = generate(plain_model, mel, "Expert", plain_config, temperature=0.5, seed=7)
+        assert t_cube == t_plain
+
+    def test_grammar_valid_with_cube_bias_active(self):
+        model, config = self._cube_model(bias_scale=5.0)
+        mel = torch.randn(80, 20)
+        tokens = generate(model, mel, "Expert", config, temperature=1.0, seed=42)
+        for i in range(1, len(tokens)):
+            prev = tokens[i - 1]
+            curr = tokens[i]
+            mask = _build_grammar_mask(prev)
+            assert mask[curr], f"Token {curr} not valid after {prev} at position {i}"
+
+    def test_strong_bias_changes_output(self):
+        """A large bias_scale must actually influence sampling, not be a
+        silent no-op — proof the bias is reaching the logits."""
+        model, config = self._cube_model(bias_scale=50.0)
+        model_no_bias, config_no_bias = self._cube_model(bias_scale=0.0)
+        model_no_bias.load_state_dict(model.state_dict())
+
+        mel = torch.randn(80, 20)
+        t_biased = generate(model, mel, "Expert", config, temperature=1.0, seed=42)
+        t_unbiased = generate(model_no_bias, mel, "Expert", config_no_bias, temperature=1.0, seed=42)
+        assert t_biased != t_unbiased
+
+
 class TestGenerateWithBombs:
     @pytest.fixture
     def small_bomb_model(self):
